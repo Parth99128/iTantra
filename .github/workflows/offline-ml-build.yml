@@ -20,6 +20,11 @@ jobs:
           java-version: '17'
           cache: gradle
 
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
       - name: Set up Python model tooling
         run: python3 -m pip install --disable-pip-version-check onnx==1.17.0
 
@@ -35,7 +40,7 @@ jobs:
           find app/src/main/assets/models -maxdepth 4 -type f -printf '%p %k KB\n' | sort
 
       - name: Build debug APK with bundled models
-        run: ./gradlew :app:assembleDebug --stacktrace
+        run: gradle :app:assembleDebug --stacktrace --no-daemon
 
       - name: Verify APK contains model assets
         run: |
