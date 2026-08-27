@@ -1,3 +1,4 @@
 <resources>
-    <style name="Theme.iTantra" parent="@android:style/Theme.DeviceDefault.DayNight.NoActionBar" />
+    <!-- Keep the XML host theme framework-only; Compose owns the visual theme in Theme.kt. -->
+    <style name="Theme.iTantra" parent="@android:style/Theme.Material.Light.NoActionBar" />
 </resources>
