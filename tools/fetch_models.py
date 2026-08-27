@@ -35,9 +35,23 @@ TTS_PACKS = {
 
 def download(url: str) -> bytes:
     print(f"  GET {url}")
-    req = urllib.request.Request(url, headers={"User-Agent": "iTantra-model-fetcher/1.0"})
-    with urllib.request.urlopen(req, timeout=180) as response:
-        return response.read()
+    req = urllib.request.Request(url, headers={"User-Agent": "iTantra-model-fetcher/1.1"})
+    last_error: Exception | None = None
+    for attempt in range(1, 6):
+        try:
+            with urllib.request.urlopen(req, timeout=180) as response:
+                data = response.read()
+                if not data:
+                    raise RuntimeError("Empty HTTP response")
+                print(f"  downloaded {len(data):,} bytes")
+                return data
+        except Exception as exc:  # pragma: no cover - exercised by CI/network failures
+            last_error = exc
+            print(f"  download attempt {attempt}/5 failed: {exc}")
+            if attempt < 5:
+                import time
+                time.sleep(attempt * 2)
+    raise RuntimeError(f"Download failed after 5 attempts: {url}") from last_error
 
 
 def extract_vosk(data: bytes, destination: Path, prefix: str) -> None:
@@ -56,9 +70,13 @@ def extract_vosk(data: bytes, destination: Path, prefix: str) -> None:
 
 
 def extract_tgz(data: bytes, destination: Path) -> None:
+    """Extract a sherpa-onnx TTS pack, stripping only its single top-level folder."""
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:bz2") as tar:
         members = tar.getmembers()
-        root = Path(members[0].name).parts[0]
+        roots = {Path(member.name).parts[0] for member in members if Path(member.name).parts}
+        if len(roots) != 1:
+            raise RuntimeError(f"Unexpected TTS archive roots: {sorted(roots)}")
+        root = next(iter(roots))
         for member in members:
             parts = Path(member.name).parts
             if not parts or parts[0] != root:
@@ -72,7 +90,8 @@ def extract_tgz(data: bytes, destination: Path) -> None:
             elif member.isfile():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with tar.extractfile(member) as src, target.open("wb") as dst:
-                    assert src is not None
+                    if src is None:
+                        raise RuntimeError(f"Unable to extract archive member: {member.name}")
                     shutil.copyfileobj(src, dst)
 
 
@@ -109,18 +128,26 @@ def fetch_tts(languages: list[str]) -> None:
             continue
         destination.mkdir(parents=True, exist_ok=True)
         extract_tgz(download(f"{SHERPA_TTS_BASE}/{archive}"), destination)
-        roots = [p for p in destination.iterdir() if p.is_dir()]
-        if len(roots) != 1:
-            raise RuntimeError(f"Unexpected archive layout for {archive}: {roots}")
-        root = roots[0]
-        models = list(root.glob("*.onnx"))
-        if not models or not (root / "tokens.txt").exists():
-            raise RuntimeError(f"Incomplete TTS pack: {archive}")
-        shutil.copy2(models[0], destination / "model.onnx")
-        shutil.copy2(root / "tokens.txt", destination / "tokens.txt")
-        if (root / "espeak-ng-data").exists():
-            shutil.copytree(root / "espeak-ng-data", destination / "espeak-ng-data", dirs_exist_ok=True)
-        shutil.rmtree(root)
+
+        # extract_tgz deliberately strips the archive's outer directory, so the
+        # model and tokens live directly in destination. The only nested folder
+        # expected by the sherpa Piper pack is espeak-ng-data/.
+        models = sorted(destination.glob("*.onnx"))
+        tokens = destination / "tokens.txt"
+        if not models or not tokens.exists():
+            files = sorted(str(p.relative_to(destination)) for p in destination.rglob("*") if p.is_file())
+            raise RuntimeError(
+                f"Incomplete TTS pack: {archive}; extracted files: {files[:40]}"
+            )
+
+        canonical = destination / "model.onnx"
+        if models[0] != canonical:
+            shutil.copy2(models[0], canonical)
+            models[0].unlink()
+
+        if (destination / "espeak-ng-data").exists() and not (destination / "espeak-ng-data").is_dir():
+            raise RuntimeError(f"Invalid espeak-ng-data entry in {archive}")
+
         (destination / "MODEL_SOURCE.json").write_text(
             json.dumps({"source": archive, "runtime": "sherpa-onnx VITS", "offline_runtime": True}, indent=2),
             encoding="utf-8",
