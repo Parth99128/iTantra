@@ -9,63 +9,51 @@ import org.vosk.Recognizer
 import org.vosk.android.StorageService
 import kotlin.coroutines.resume
 
-/**
- * Wraps Vosk's offline recognizer.
- *
- * SETUP REQUIRED BEFORE THIS COMPILES/RUNS (see README "Model Setup" section):
- *  1. Download a small Vosk model per language from https://alphacephei.com/vosk/models
- *     (pick the "-small" variants — typically 40-50MB — for the RAM/flash footprint metric).
- *  2. Unzip each into app/src/main/assets/models/vosk/<lang_code>/  e.g. .../vosk/hi/
- *  3. Vosk does not ship small models for every one of the 10 target languages yet —
- *     cross-check availability first and pick your 3 demo languages accordingly
- *     (Hindi + English have the most mature Vosk community models as of writing).
- *
- * SAMPLE RATE: Vosk expects 16kHz mono PCM16 — AudioRecorder.kt is already configured
- * for this, do not change the sample rate independently in one place only.
- */
+/** Real streaming offline Vosk STT. Models are bundled in assets/models/vosk/<lang>. */
 class VoskSttEngine(private val context: Context) : SttEngine {
-
     private var model: Model? = null
     private var recognizer: Recognizer? = null
     private val resultCallbacks = mutableListOf<(SttResult) -> Unit>()
-    private var utteranceStartMs: Long = 0L
+    private var audioSamples: Long = 0
+    private var inferenceTimeMs: Long = 0
 
     override suspend fun loadModel(language: SupportedLanguage) {
         val assetPath = "models/vosk/${language.bcp47}"
         model = suspendCancellableCoroutine { cont ->
             StorageService.unpack(
-                context, assetPath, "vosk-model-${language.bcp47}",
-                { unpackedModel -> cont.resume(unpackedModel) },
-                { exception ->
-                    // Fail loudly rather than silently — a missing model is the #1
-                    // reason this pipeline appears "broken" during rehearsal.
+                context,
+                assetPath,
+                "vosk-model-${language.bcp47}",
+                { unpacked -> cont.resume(unpacked) },
+                { error ->
                     throw IllegalStateException(
-                        "Vosk model for ${language.displayName} not found at " +
-                        "assets/$assetPath — did you download and unzip it? " +
-                        "See README Model Setup.", exception
+                        "Offline Vosk model missing at assets/$assetPath. " +
+                            "Run tools/fetch_models.py before building.", error
                     )
-                }
+                },
             )
         }
         recognizer = Recognizer(model, 16000.0f)
+        audioSamples = 0
+        inferenceTimeMs = 0
     }
 
     override fun acceptAudioFrame(pcm16: ShortArray, frameSize: Int) {
-        if (utteranceStartMs == 0L) utteranceStartMs = System.currentTimeMillis()
         val rec = recognizer ?: return
+        audioSamples += frameSize
         val bytes = ByteArray(frameSize * 2)
         for (i in 0 until frameSize) {
             val v = pcm16[i].toInt()
             bytes[i * 2] = (v and 0xFF).toByte()
             bytes[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
         }
+        val start = System.nanoTime()
         val gotFinal = rec.acceptWaveForm(bytes, bytes.size)
+        inferenceTimeMs += (System.nanoTime() - start) / 1_000_000
         val json = if (gotFinal) rec.result else rec.partialResult
         val key = if (gotFinal) "text" else "partial"
         val text = JSONObject(json).optString(key, "")
-        if (text.isNotBlank()) {
-            emit(SttResult(text = text, isFinal = gotFinal))
-        }
+        if (text.isNotBlank()) emit(SttResult(text, gotFinal))
     }
 
     override fun observePartialResults(): SttResultFlow = SttResultFlow { cb ->
@@ -74,11 +62,18 @@ class VoskSttEngine(private val context: Context) : SttEngine {
 
     override suspend fun finalizeUtterance(): SttResult {
         val rec = recognizer ?: return SttResult("", true)
-        val elapsed = System.currentTimeMillis() - utteranceStartMs
-        val json = rec.finalResult
-        val text = JSONObject(json).optString("text", "")
-        utteranceStartMs = 0L
-        val result = SttResult(text = text, isFinal = true, processingTimeMs = elapsed)
+        val start = System.nanoTime()
+        val text = JSONObject(rec.finalResult).optString("text", "")
+        inferenceTimeMs += (System.nanoTime() - start) / 1_000_000
+        val durationMs = audioSamples * 1000 / 16000
+        val result = SttResult(
+            text = text,
+            isFinal = true,
+            processingTimeMs = inferenceTimeMs,
+            audioDurationMs = durationMs,
+        )
+        audioSamples = 0
+        inferenceTimeMs = 0
         emit(result)
         return result
     }
@@ -86,6 +81,8 @@ class VoskSttEngine(private val context: Context) : SttEngine {
     override fun release() {
         recognizer?.close()
         model?.close()
+        recognizer = null
+        model = null
     }
 
     private fun emit(result: SttResult) {
