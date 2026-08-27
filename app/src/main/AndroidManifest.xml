@@ -1,33 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Mic access for STT -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-
-    <!-- Classic Bluetooth (walkie-talkie link) -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
-    <!-- Required pre-Android12 for Bluetooth device discovery -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-
-    <!-- To force max volume / non-interruptible alert playback on the STREAM_ALARM channel -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
-
-    <!-- Foreground service so listening/STT keeps running if the app is backgrounded
-         (important for a real alert/distress use case, not just a demo detail) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-
-    <!-- Explicitly NO internet permission: the whole point is fully offline operation.
-         Do not add android.permission.INTERNET — its absence is itself proof to
-         judges that no cloud STT/TTS API calls are possible. -->
 
     <application
         android:allowBackup="false"
         android:label="iTantra"
-        android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.iTantra"
         android:usesCleartextTraffic="false">
 
