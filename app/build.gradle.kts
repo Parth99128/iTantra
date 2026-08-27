@@ -13,10 +13,7 @@ android {
         targetSdk = 34
         versionCode = 2
         versionName = "0.2-offline-ml"
-
-        ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
-        }
+        ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a") }
     }
 
     buildTypes {
@@ -26,10 +23,7 @@ android {
         }
     }
 
-    // Neural model archives are unpacked into assets before Gradle runs.
-    aaptOptions {
-        noCompress += listOf("tflite", "onnx", "bin", "task")
-    }
+    aaptOptions { noCompress += listOf("tflite", "onnx", "bin", "task") }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -39,10 +33,7 @@ android {
 
     buildFeatures { compose = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
-
-    packaging {
-        resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
-    }
+    packaging { resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" } }
 }
 
 dependencies {
@@ -57,16 +48,12 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // Offline streaming STT for lightweight demo language packs.
+    // Real offline streaming/mobile STT packs.
     implementation("com.alphacephei:vosk-android:0.3.70")
     implementation("net.java.dev.jna:jna:5.14.0@aar")
 
-    // Open-source native ONNX runtime used by Silero VAD.
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
-
-    // Open-source Android sherpa-onnx runtime for real Piper/VITS inference.
-    // It handles Piper's phonemization + ONNX model inputs instead of the previous
-    // placeholder character-level VITS implementation.
+    // Sherpa-ONNX supplies the open-source ONNX Runtime used by both the real
+    // Piper/VITS TTS engine and the local Silero VAD implementation.
     implementation("com.xdcobra.sherpa:sherpa-onnx:1.13.2-1")
     implementation("com.xdcobra.sherpa:onnxruntime:1.13.2-1")
 
