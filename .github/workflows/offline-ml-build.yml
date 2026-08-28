@@ -34,28 +34,41 @@ jobs:
       - name: Install Android SDK 34
         run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0'
 
-      - name: Provision compact real offline model packs
+      - name: Provision real offline model pack outside APK
         run: |
-          rm -rf app/src/main/assets/models
+          rm -rf app/src/main/assets/models build/model-pack
           python3 tools/fetch_models.py --stt hi,en --tts hi,mr,en
-          echo "=== model footprint ==="
-          du -sh app/src/main/assets/models
-          find app/src/main/assets/models -type f -printf '%p %k KB\n' | sort
+          mkdir -p build/model-pack
+          cp -a app/src/main/assets/models build/model-pack/models
+          echo "=== offline model pack footprint ==="
+          du -sh build/model-pack/models
+          find build/model-pack/models -type f -printf '%p %k KB\n' | sort
+          rm -rf app/src/main/assets/models
 
-      - name: Build ABI-specific debug APKs
+      - name: Build compact ABI-specific APKs
         run: gradle :app:assembleDebug --stacktrace --no-daemon
 
-      - name: Verify APKs and report sizes
+      - name: Verify compact APKs
         run: |
           find app/build/outputs/apk -type f -name '*.apk' -print -exec du -h {} \;
-          for APK in app/build/outputs/apk/debug/*.apk; do
-            echo "=== $APK ==="
-            unzip -l "$APK" | grep -E 'silero_vad|model.onnx|tokens.txt|espeak-ng-data' | head -100
-          done
+          echo "=== APK must not contain neural model weights ==="
+          if unzip -l app/build/outputs/apk/debug/app-arm64-v8a-debug.apk | grep -E 'assets/models|model.onnx|final.mdl|Gr.fst|silero_vad'; then
+            echo 'ERROR: model weights leaked into APK'
+            exit 1
+          fi
 
-      - name: Upload ABI-specific APKs
+      - name: Zip offline model pack
+        run: |
+          cd build/model-pack
+          zip -qr ../itantra-offline-model-pack-hi-en-mr.zip models
+          cd ../..
+          ls -lh build/itantra-offline-model-pack-hi-en-mr.zip
+
+      - name: Upload compact APKs and offline model pack
         uses: actions/upload-artifact@v4
         with:
-          name: itantra-offline-ml-debug-apks
-          path: app/build/outputs/apk/debug/*.apk
+          name: itantra-offline-ml-release
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            build/itantra-offline-model-pack-hi-en-mr.zip
           retention-days: 14
