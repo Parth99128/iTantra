@@ -4,10 +4,7 @@ import android.bluetooth.BluetoothDevice
 
 enum class OperatingMode { WALKIE_TALKIE, NORMAL_PHONE }
 
-enum class TalkState {
-    IDLE, LISTENING_FOR_SPEECH, TRANSMITTING, RECEIVING, PLAYING_ALERT
-}
-
+enum class TalkState { IDLE, LISTENING_FOR_SPEECH, TRANSMITTING, RECEIVING, PLAYING_ALERT }
 enum class BtConnectionState { DISCONNECTED, SCANNING, CONNECTING, CONNECTED }
 
 enum class SupportedLanguage(val displayName: String, val bcp47: String) {
@@ -32,5 +29,6 @@ data class UiState(
     val installInProgress: Boolean = false,
     val installMessage: String = "",
     val bluetoothDevices: List<BluetoothPeer> = emptyList(),
+    val permissionWarning: String? = null,
     val errorMessage: String? = null
 )
