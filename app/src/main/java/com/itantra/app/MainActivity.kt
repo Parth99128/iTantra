@@ -1,6 +1,7 @@
 package com.itantra.app
 
 import android.Manifest
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
@@ -21,13 +22,36 @@ import com.itantra.app.ui.theme.ITantraTheme
 
 class MainActivity : ComponentActivity() {
     private val viewModel: WalkieTalkieViewModel by viewModels()
-    private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
-    private val modelPackPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(viewModel::installModelPack) }
+    private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        if (result.values.any { it == false }) viewModel.setPermissionWarning("Bluetooth/microphone permission is required for the selected feature.")
+    }
+    private val modelPackPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(viewModel::installModelPack)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         viewModel.attachActivity(this)
-        permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.ACCESS_FINE_LOCATION))
-        setContent { ITantraTheme { Surface(Modifier.fillMaxSize()) { WalkieTalkieScreen(viewModel) { modelPackPicker.launch(arrayOf("application/zip", "application/octet-stream")) } } } }
+        val permissions = buildList {
+            add(Manifest.permission.RECORD_AUDIO)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                add(Manifest.permission.BLUETOOTH_CONNECT)
+                add(Manifest.permission.BLUETOOTH_SCAN)
+                add(Manifest.permission.BLUETOOTH_ADVERTISE)
+            } else {
+                add(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+        }
+        permissionLauncher.launch(permissions.toTypedArray())
+        setContent {
+            ITantraTheme {
+                Surface(Modifier.fillMaxSize()) {
+                    WalkieTalkieScreen(viewModel) {
+                        modelPackPicker.launch(arrayOf("application/zip", "application/octet-stream"))
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -38,25 +62,35 @@ fun WalkieTalkieScreen(viewModel: WalkieTalkieViewModel, onPickModelPack: () -> 
     var langExpanded by remember { mutableStateOf(false) }
     var peerExpanded by remember { mutableStateOf(false) }
     var ttsText by remember { mutableStateOf("आपातकालीन संदेश: कृपया तुरंत सहायता भेजें।") }
+
     LazyColumn(Modifier.fillMaxSize().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         item {
             Text("iTantra", style = MaterialTheme.typography.headlineMedium)
             Text("Offline Neural Transceiver Radio")
             Spacer(Modifier.height(12.dp))
-            Button(onPickModelPack, enabled = !state.installInProgress) { Text(if (state.installInProgress) "Installing…" else "Install Offline Model Pack") }
-            if (state.installInProgress) { Spacer(Modifier.height(8.dp)); LinearProgressIndicator(Modifier.fillMaxWidth()) }
+            Button(onPickModelPack, enabled = !state.installInProgress) {
+                Text(if (state.installInProgress) "Installing…" else "Install Offline Model Pack")
+            }
+            if (state.installInProgress) {
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
             if (state.installMessage.isNotBlank()) Text(state.installMessage, style = MaterialTheme.typography.bodySmall)
+            state.permissionWarning?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             Text("Models stay on-device; inference does not use the internet.", style = MaterialTheme.typography.labelSmall)
             Spacer(Modifier.height(12.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Walkie-Talkie Mode"); Spacer(Modifier.width(8.dp))
+                Text("Walkie-Talkie Mode")
+                Spacer(Modifier.width(8.dp))
                 Switch(checked = state.mode == OperatingMode.WALKIE_TALKIE, onCheckedChange = { viewModel.setMode(if (it) OperatingMode.WALKIE_TALKIE else OperatingMode.NORMAL_PHONE) })
             }
             Spacer(Modifier.height(8.dp))
             Box {
                 OutlinedButton({ langExpanded = true }) { Text(state.language.displayName) }
                 DropdownMenu(expanded = langExpanded, onDismissRequest = { langExpanded = false }) {
-                    SupportedLanguage.values().forEach { lang -> DropdownMenuItem(text = { Text(lang.displayName) }, onClick = { viewModel.loadModels(lang); langExpanded = false }) }
+                    SupportedLanguage.values().forEach { lang ->
+                        DropdownMenuItem(text = { Text(lang.displayName) }, onClick = { viewModel.loadModels(lang); langExpanded = false })
+                    }
                 }
             }
             Spacer(Modifier.height(10.dp))
@@ -69,9 +103,13 @@ fun WalkieTalkieScreen(viewModel: WalkieTalkieViewModel, onPickModelPack: () -> 
                 OutlinedButton({ viewModel.disconnectBluetooth() }) { Text("Disconnect") }
             }
             Spacer(Modifier.height(6.dp))
-            OutlinedButton({ peerExpanded = !peerExpanded }, Modifier.fillMaxWidth()) { Text(if (state.bluetoothDevices.isEmpty()) "Select paired/discovered phone" else "Select phone (${state.bluetoothDevices.size})") }
-            DropdownMenu(expanded = peerExpanded, onDismissRequest = { peerExpanded = false }, modifier = Modifier.fillMaxWidth()) {
-                state.bluetoothDevices.forEach { peer -> DropdownMenuItem(text = { Text("${peer.name}\n${peer.address}") }, onClick = { viewModel.connectToPeer(peer); peerExpanded = false }) }
+            OutlinedButton({ peerExpanded = !peerExpanded }, Modifier.fillMaxWidth()) {
+                Text(if (state.bluetoothDevices.isEmpty()) "Select paired/discovered phone" else "Select phone (${state.bluetoothDevices.size})")
+            }
+            DropdownMenu(expanded = peerExpanded, onDismissRequest = { peerExpanded = false }) {
+                state.bluetoothDevices.forEach { peer ->
+                    DropdownMenuItem(text = { Text("${peer.name}\n${peer.address}") }, onClick = { viewModel.connectToPeer(peer); peerExpanded = false })
+                }
             }
             Spacer(Modifier.height(14.dp))
             Card(Modifier.fillMaxWidth()) {
@@ -91,9 +129,12 @@ fun WalkieTalkieScreen(viewModel: WalkieTalkieViewModel, onPickModelPack: () -> 
                 when (event.action) {
                     android.view.MotionEvent.ACTION_DOWN -> viewModel.onPushToTalkStart()
                     android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> viewModel.onPushToTalkEnd()
-                }; true
+                }
+                true
             }
-            Button({}, ptt, shape = MaterialTheme.shapes.extraLarge, enabled = state.mode == OperatingMode.WALKIE_TALKIE) { Text(if (state.talkState == TalkState.LISTENING_FOR_SPEECH) "LISTENING…" else "HOLD TO TALK") }
+            Button({}, ptt, shape = MaterialTheme.shapes.extraLarge, enabled = state.mode == OperatingMode.WALKIE_TALKIE && !state.installInProgress) {
+                Text(if (state.talkState == TalkState.LISTENING_FOR_SPEECH) "LISTENING…" else "HOLD TO TALK")
+            }
             Spacer(Modifier.height(16.dp))
             Text("State: ${state.talkState}", style = MaterialTheme.typography.labelLarge)
             state.errorMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
@@ -111,5 +152,10 @@ fun WalkieTalkieScreen(viewModel: WalkieTalkieViewModel, onPickModelPack: () -> 
 @Composable
 fun TranscriptCard(label: String, text: String) {
     if (text.isBlank()) return
-    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) { Column(Modifier.padding(12.dp)) { Text(label, style = MaterialTheme.typography.labelMedium); Text(text, style = MaterialTheme.typography.bodyLarge) } }
+    Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            Text(label, style = MaterialTheme.typography.labelMedium)
+            Text(text, style = MaterialTheme.typography.bodyLarge)
+        }
+    }
 }
