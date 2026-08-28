@@ -1,42 +1,23 @@
 package com.itantra.app.core
 
-/** Master toggle required by the PS: walkie-talkie mode vs behaving like a normal phone. */
-enum class OperatingMode {
-    WALKIE_TALKIE,
-    NORMAL_PHONE
-}
+import android.bluetooth.BluetoothDevice
 
-/** Per-device role in the push-to-talk loop. A phone can switch roles instantly;
- *  it is not hardwired to one role. */
+enum class OperatingMode { WALKIE_TALKIE, NORMAL_PHONE }
+
 enum class TalkState {
-    IDLE,               // not transmitting, listening for incoming TTS playback
-    LISTENING_FOR_SPEECH, // push-to-talk held down, VAD+STT pipeline active
-    TRANSMITTING,       // finalized text being sent over Bluetooth
-    RECEIVING,          // incoming text received, TTS synthesis in progress
-    PLAYING_ALERT       // TTS audio currently playing back (non-interruptible)
+    IDLE, LISTENING_FOR_SPEECH, TRANSMITTING, RECEIVING, PLAYING_ALERT
 }
 
-enum class BtConnectionState {
-    DISCONNECTED,
-    SCANNING,
-    CONNECTING,
-    CONNECTED
-}
+enum class BtConnectionState { DISCONNECTED, SCANNING, CONNECTING, CONNECTED }
 
 enum class SupportedLanguage(val displayName: String, val bcp47: String) {
-    HINDI("Hindi", "hi"),
-    ENGLISH("English", "en"),
-    MARATHI("Marathi", "mr"),
-    GUJARATI("Gujarati", "gu"),
-    BENGALI("Bengali", "bn"),
-    KANNADA("Kannada", "kn"),
-    MALAYALAM("Malayalam", "ml"),
-    TAMIL("Tamil", "ta"),
-    TELUGU("Telugu", "te"),
-    ODIA("Odia", "or")
+    HINDI("Hindi", "hi"), ENGLISH("English", "en"), MARATHI("Marathi", "mr"),
+    GUJARATI("Gujarati", "gu"), BENGALI("Bengali", "bn"), KANNADA("Kannada", "kn"),
+    MALAYALAM("Malayalam", "ml"), TAMIL("Tamil", "ta"), TELUGU("Telugu", "te"), ODIA("Odia", "or")
 }
 
-/** Single immutable snapshot the UI observes. */
+data class BluetoothPeer(val address: String, val name: String, val device: BluetoothDevice)
+
 data class UiState(
     val mode: OperatingMode = OperatingMode.WALKIE_TALKIE,
     val talkState: TalkState = TalkState.IDLE,
@@ -48,5 +29,8 @@ data class UiState(
     val lastSttLatencyMs: Long = 0,
     val lastTtsLatencyMs: Long = 0,
     val lastEndToEndMs: Long = 0,
+    val installInProgress: Boolean = false,
+    val installMessage: String = "",
+    val bluetoothDevices: List<BluetoothPeer> = emptyList(),
     val errorMessage: String? = null
 )
