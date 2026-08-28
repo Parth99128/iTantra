@@ -34,41 +34,42 @@ jobs:
       - name: Install Android SDK 34
         run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0'
 
-      - name: Provision real offline model pack outside APK
+      - name: Build compact base APK without neural weights
         run: |
-          rm -rf app/src/main/assets/models build/model-pack
-          python3 tools/fetch_models.py --stt hi,en --tts hi,mr,en
-          mkdir -p build/model-pack
-          cp -a app/src/main/assets/models build/model-pack/models
-          echo "=== offline model pack footprint ==="
-          du -sh build/model-pack/models
-          find build/model-pack/models -type f -printf '%p %k KB\n' | sort
-          rm -rf app/src/main/assets/models
+          rm -rf app/src/main/assets/models build/model-packs
+          gradle :app:assembleDebug --stacktrace --no-daemon
 
-      - name: Build compact ABI-specific APKs
-        run: gradle :app:assembleDebug --stacktrace --no-daemon
-
-      - name: Verify compact APKs
+      - name: Verify APK contains no neural weights
         run: |
           find app/build/outputs/apk -type f -name '*.apk' -print -exec du -h {} \;
-          echo "=== APK must not contain neural model weights ==="
           if unzip -l app/build/outputs/apk/debug/app-arm64-v8a-debug.apk | grep -E 'assets/models|model.onnx|final.mdl|Gr.fst|silero_vad'; then
-            echo 'ERROR: model weights leaked into APK'
+            echo 'ERROR: model weights leaked into base APK'
             exit 1
           fi
 
-      - name: Zip offline model pack
+      - name: Build individual offline language packs
         run: |
-          cd build/model-pack
-          zip -qr ../itantra-offline-model-pack-hi-en-mr.zip models
-          cd ../..
-          ls -lh build/itantra-offline-model-pack-hi-en-mr.zip
+          mkdir -p build/model-packs
+          for spec in 'hi:hi:hi' 'en:en:en' 'mr:none:mr'; do
+            IFS=: read -r name stt tts <<< "$spec"
+            rm -rf app/src/main/assets/models
+            python3 tools/fetch_models.py --stt "$stt" --tts "$tts"
+            mkdir -p "build/model-packs/$name"
+            cp -a app/src/main/assets/models "build/model-packs/$name/models"
+            echo "=== $name pack footprint ==="
+            du -sh "build/model-packs/$name/models"
+            cd "build/model-packs/$name"
+            zip -qr "../itantra-offline-$name-pack.zip" models
+            cd ../../..
+          done
+          rm -rf app/src/main/assets/models
+          ls -lh build/model-packs/*.zip
 
-      - name: Upload compact APKs and offline model pack
+      - name: Upload APK and separate offline language packs
         uses: actions/upload-artifact@v4
         with:
           name: itantra-offline-ml-release
           path: |
             app/build/outputs/apk/debug/*.apk
-            build/itantra-offline-model-pack-hi-en-mr.zip
+            build/model-packs/*.zip
           retention-days: 14
