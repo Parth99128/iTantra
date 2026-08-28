@@ -4,6 +4,7 @@ import android.Manifest
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
@@ -14,7 +15,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInteropFilter
-import androidx.compose.ui.text.input.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.itantra.app.core.*
@@ -38,9 +39,7 @@ class MainActivity : ComponentActivity() {
                 add(Manifest.permission.BLUETOOTH_CONNECT)
                 add(Manifest.permission.BLUETOOTH_SCAN)
                 add(Manifest.permission.BLUETOOTH_ADVERTISE)
-            } else {
-                add(Manifest.permission.ACCESS_FINE_LOCATION)
-            }
+            } else add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
         permissionLauncher.launch(permissions.toTypedArray())
         setContent {
@@ -68,7 +67,7 @@ fun WalkieTalkieScreen(viewModel: WalkieTalkieViewModel, onPickModelPack: () -> 
             Text("iTantra", style = MaterialTheme.typography.headlineMedium)
             Text("Offline Neural Transceiver Radio")
             Spacer(Modifier.height(12.dp))
-            Button(onPickModelPack, enabled = !state.installInProgress) {
+            Button(onClick = onPickModelPack, enabled = !state.installInProgress) {
                 Text(if (state.installInProgress) "Installing…" else "Install Offline Model Pack")
             }
             if (state.installInProgress) {
@@ -82,11 +81,11 @@ fun WalkieTalkieScreen(viewModel: WalkieTalkieViewModel, onPickModelPack: () -> 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Walkie-Talkie Mode")
                 Spacer(Modifier.width(8.dp))
-                Switch(checked = state.mode == OperatingMode.WALKIE_TALKIE, onCheckedChange = { viewModel.setMode(if (it) OperatingMode.WALKIE_TALKIE else OperatingMode.NORMAL_PHONE) })
+                Switch(checked = state.mode == OperatingMode.WALKIE_TALKIE, onCheckedChange = { viewModel.setMode(if (it) OperatingMode.NORMAL_PHONE else OperatingMode.WALKIE_TALKIE) })
             }
             Spacer(Modifier.height(8.dp))
             Box {
-                OutlinedButton({ langExpanded = true }) { Text(state.language.displayName) }
+                OutlinedButton(onClick = { langExpanded = true }) { Text(state.language.displayName) }
                 DropdownMenu(expanded = langExpanded, onDismissRequest = { langExpanded = false }) {
                     SupportedLanguage.values().forEach { lang ->
                         DropdownMenuItem(text = { Text(lang.displayName) }, onClick = { viewModel.loadModels(lang); langExpanded = false })
@@ -96,14 +95,14 @@ fun WalkieTalkieScreen(viewModel: WalkieTalkieViewModel, onPickModelPack: () -> 
             Spacer(Modifier.height(10.dp))
             Text("Bluetooth: ${state.btState}", style = MaterialTheme.typography.labelLarge)
             Row {
-                OutlinedButton({ viewModel.startDiscovery() }) { Text("Scan") }
+                OutlinedButton(onClick = { viewModel.startDiscovery() }) { Text("Scan") }
                 Spacer(Modifier.width(6.dp))
-                Button({ viewModel.startAsHost() }) { Text("Host") }
+                Button(onClick = { viewModel.startAsHost() }) { Text("Host") }
                 Spacer(Modifier.width(6.dp))
-                OutlinedButton({ viewModel.disconnectBluetooth() }) { Text("Disconnect") }
+                OutlinedButton(onClick = { viewModel.disconnectBluetooth() }) { Text("Disconnect") }
             }
             Spacer(Modifier.height(6.dp))
-            OutlinedButton({ peerExpanded = !peerExpanded }, Modifier.fillMaxWidth()) {
+            OutlinedButton(onClick = { peerExpanded = !peerExpanded }, modifier = Modifier.fillMaxWidth()) {
                 Text(if (state.bluetoothDevices.isEmpty()) "Select paired/discovered phone" else "Select phone (${state.bluetoothDevices.size})")
             }
             DropdownMenu(expanded = peerExpanded, onDismissRequest = { peerExpanded = false }) {
@@ -117,9 +116,16 @@ fun WalkieTalkieScreen(viewModel: WalkieTalkieViewModel, onPickModelPack: () -> 
                     Text("Offline TTS", style = MaterialTheme.typography.titleMedium)
                     Text(if (state.language == SupportedLanguage.MARATHI) "Marathi is TTS-only in the current model matrix." else "Speak text locally without Bluetooth.", style = MaterialTheme.typography.bodySmall)
                     Spacer(Modifier.height(6.dp))
-                    OutlinedTextField(ttsText, { ttsText = it }, Modifier.fillMaxWidth(), label = { Text("Text to speak") }, minLines = 2, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
+                    OutlinedTextField(
+                        value = ttsText,
+                        onValueChange = { ttsText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Text to speak") },
+                        minLines = 2,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
+                    )
                     Spacer(Modifier.height(6.dp))
-                    Button({ viewModel.testTts(ttsText) }, enabled = ttsText.isNotBlank() && !state.installInProgress) { Text("Speak Offline") }
+                    Button(onClick = { viewModel.testTts(ttsText) }, enabled = ttsText.isNotBlank() && !state.installInProgress) { Text("Speak Offline") }
                 }
             }
             Spacer(Modifier.height(18.dp))
@@ -132,7 +138,7 @@ fun WalkieTalkieScreen(viewModel: WalkieTalkieViewModel, onPickModelPack: () -> 
                 }
                 true
             }
-            Button({}, ptt, shape = MaterialTheme.shapes.extraLarge, enabled = state.mode == OperatingMode.WALKIE_TALKIE && !state.installInProgress) {
+            Button(onClick = {}, modifier = ptt, shape = MaterialTheme.shapes.extraLarge, enabled = state.mode == OperatingMode.WALKIE_TALKIE && !state.installInProgress) {
                 Text(if (state.talkState == TalkState.LISTENING_FOR_SPEECH) "LISTENING…" else "HOLD TO TALK")
             }
             Spacer(Modifier.height(16.dp))
