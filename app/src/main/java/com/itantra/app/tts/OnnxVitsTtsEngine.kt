@@ -37,9 +37,10 @@ class OnnxVitsTtsEngine(private val context: Context) : TtsEngine {
                 debug = false,
             )
         )
-        // This sherpa-onnx Android binding exposes the config-only constructor;
-        // model paths in the config are absolute filesystem paths.
-        tts = OfflineTts(config)
+        // The pinned Android Kotlin binding exposes OfflineTts(assetManager, config).
+        // Passing null selects sherpa's filesystem-backed constructor while keeping
+        // model and phonemizer paths fully local to the installed pack.
+        tts = OfflineTts(null, config)
         outputSampleRate = tts?.sampleRate() ?: 22050
     }
 
