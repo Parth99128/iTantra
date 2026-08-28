@@ -7,11 +7,7 @@ import android.content.Context
 import com.itantra.app.core.ModelPackManager
 import java.nio.FloatBuffer
 
-/**
- * Offline Silero VAD with compatibility for the two common exported contracts:
- *  - x, h, c  (the model currently bundled by iTantra)
- *  - input, state, sr (newer Silero export)
- */
+/** Offline Silero VAD with compatibility for the two common exported contracts. */
 class SileroVad(context: Context) {
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val session: OrtSession
@@ -39,15 +35,12 @@ class SileroVad(context: Context) {
         val names = session.inputNames
         usesXhc = names.contains("x") && names.contains("h") && names.contains("c")
         require(usesXhc || (names.contains("input") && names.contains("state") && names.contains("sr"))) {
-            "Unsupported Silero VAD input contract: ${names.joinToString() }"
+            "Unsupported Silero VAD input contract: ${names.joinToString()}"
         }
     }
 
     fun processChunk(pcmFloat: FloatArray): VadResult {
-        require(pcmFloat.size == CHUNK_SAMPLES) {
-            "Silero VAD expects $CHUNK_SAMPLES samples per chunk, got ${pcmFloat.size}"
-        }
-
+        require(pcmFloat.size == CHUNK_SAMPLES) { "Silero VAD expects $CHUNK_SAMPLES samples per chunk, got ${pcmFloat.size}" }
         return if (usesXhc) processXhc(pcmFloat) else processStateSr(pcmFloat)
     }
 
@@ -55,7 +48,6 @@ class SileroVad(context: Context) {
         val xTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(pcmFloat), longArrayOf(1, CHUNK_SAMPLES.toLong()))
         val hTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(h), longArrayOf(2, 1, 64))
         val cTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(c), longArrayOf(2, 1, 64))
-
         session.run(mapOf("x" to xTensor, "h" to hTensor, "c" to cTensor)).use { results ->
             val prob = extractSpeechProbability(results[0].value)
             h = flattenFloatArray(results[1].value, HC_SIZE)
@@ -68,11 +60,9 @@ class SileroVad(context: Context) {
         val input = FloatArray(CONTEXT_SAMPLES + pcmFloat.size)
         System.arraycopy(contextSamples, 0, input, 0, CONTEXT_SAMPLES)
         System.arraycopy(pcmFloat, 0, input, CONTEXT_SAMPLES, pcmFloat.size)
-
         val inputTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(input), longArrayOf(1, input.size.toLong()))
         val stateTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(state), longArrayOf(2, 1, 128))
         val srTensor = OnnxTensor.createTensor(env, longArrayOf(SAMPLE_RATE.toLong()))
-
         session.run(mapOf("input" to inputTensor, "state" to stateTensor, "sr" to srTensor)).use { results ->
             val prob = extractSpeechProbability(results[0].value)
             state = flattenFloatArray(results[1].value, STATE_SIZE)
@@ -88,23 +78,27 @@ class SileroVad(context: Context) {
     }
 
     fun reset() {
-        h.fill(0f)
-        c.fill(0f)
-        state.fill(0f)
-        contextSamples.fill(0f)
-        consecutiveSilentChunks = 0
+        h.fill(0f); c.fill(0f); state.fill(0f); contextSamples.fill(0f); consecutiveSilentChunks = 0
     }
 
     fun release() = session.close()
 
-    private fun extractSpeechProbability(value: Any?): Float = when (value) {
-        is FloatArray -> value.firstOrNull() ?: 0f
-        is Array<*> -> {
-            var current: Any? = value
-            while (current is Array<*>) current = current.firstOrNull()
-            current as? Float ?: error("Unexpected Silero probability value: $current")
+    /** ONNX Runtime may expose a scalar as Float, FloatArray, or arbitrarily nested arrays. */
+    private fun extractSpeechProbability(value: Any?): Float {
+        return when (value) {
+            is Number -> value.toFloat()
+            is FloatArray -> value.firstOrNull() ?: error("Silero probability output is empty")
+            is DoubleArray -> value.firstOrNull()?.toFloat() ?: error("Silero probability output is empty")
+            is IntArray -> value.firstOrNull()?.toFloat() ?: error("Silero probability output is empty")
+            is LongArray -> value.firstOrNull()?.toFloat() ?: error("Silero probability output is empty")
+            is Array<*> -> {
+                for (item in value) {
+                    try { return extractSpeechProbability(item) } catch (_: IllegalStateException) { }
+                }
+                error("Unexpected Silero probability array contents")
+            }
+            else -> error("Unexpected Silero probability output type: ${value?.javaClass?.name}")
         }
-        else -> error("Unexpected Silero probability output type: ${value?.javaClass?.name}")
     }
 
     private fun flattenFloatArray(value: Any?, expectedSize: Int): FloatArray {
