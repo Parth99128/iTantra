@@ -1,15 +1,13 @@
 package com.itantra.app.stt
 
 import android.content.Context
+import com.itantra.app.core.ModelPackManager
 import com.itantra.app.core.SupportedLanguage
-import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
-import org.vosk.android.StorageService
-import kotlin.coroutines.resume
 
-/** Real streaming offline Vosk STT. Models are bundled in assets/models/vosk/<lang>. */
+/** Real streaming offline Vosk STT. Models are installed into app-private model-pack storage. */
 class VoskSttEngine(private val context: Context) : SttEngine {
     private var model: Model? = null
     private var recognizer: Recognizer? = null
@@ -18,21 +16,10 @@ class VoskSttEngine(private val context: Context) : SttEngine {
     private var inferenceTimeMs: Long = 0
 
     override suspend fun loadModel(language: SupportedLanguage) {
-        val assetPath = "models/vosk/${language.bcp47}"
-        model = suspendCancellableCoroutine { cont ->
-            StorageService.unpack(
-                context,
-                assetPath,
-                "vosk-model-${language.bcp47}",
-                { unpacked -> cont.resume(unpacked) },
-                { error ->
-                    throw IllegalStateException(
-                        "Offline Vosk model missing at assets/$assetPath. " +
-                            "Run tools/fetch_models.py before building.", error
-                    )
-                },
-            )
-        }
+        val dir = ModelPackManager(context).rootDir().resolve("vosk/${language.bcp47}")
+        require(dir.resolve("am").exists()) { "Offline ${language.displayName} STT pack is not installed" }
+        release()
+        model = Model(dir.absolutePath)
         recognizer = Recognizer(model, 16000.0f)
         audioSamples = 0
         inferenceTimeMs = 0
@@ -56,9 +43,7 @@ class VoskSttEngine(private val context: Context) : SttEngine {
         if (text.isNotBlank()) emit(SttResult(text, gotFinal))
     }
 
-    override fun observePartialResults(): SttResultFlow = SttResultFlow { cb ->
-        resultCallbacks.add(cb)
-    }
+    override fun observePartialResults(): SttResultFlow = SttResultFlow { cb -> resultCallbacks.add(cb) }
 
     override suspend fun finalizeUtterance(): SttResult {
         val rec = recognizer ?: return SttResult("", true)
@@ -66,12 +51,7 @@ class VoskSttEngine(private val context: Context) : SttEngine {
         val text = JSONObject(rec.finalResult).optString("text", "")
         inferenceTimeMs += (System.nanoTime() - start) / 1_000_000
         val durationMs = audioSamples * 1000 / 16000
-        val result = SttResult(
-            text = text,
-            isFinal = true,
-            processingTimeMs = inferenceTimeMs,
-            audioDurationMs = durationMs,
-        )
+        val result = SttResult(text, true, inferenceTimeMs, durationMs)
         audioSamples = 0
         inferenceTimeMs = 0
         emit(result)
@@ -85,7 +65,5 @@ class VoskSttEngine(private val context: Context) : SttEngine {
         model = null
     }
 
-    private fun emit(result: SttResult) {
-        resultCallbacks.forEach { it(result) }
-    }
+    private fun emit(result: SttResult) { resultCallbacks.forEach { it(result) } }
 }
