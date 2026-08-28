@@ -3,12 +3,14 @@ name: iTantra Offline ML Build
 on:
   workflow_dispatch:
   push:
-    branches: [sih-26173-offline-ml]
+    branches:
+      - sih-26173-offline-ml
 
 jobs:
   build-offline-ml:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,58 +37,115 @@ jobs:
         run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0'
 
       - name: Build compact base APK without neural weights
+        shell: bash
         run: |
+          set -euo pipefail
           rm -rf app/src/main/assets/models build/model-packs
           gradle :app:assembleDebug --stacktrace --no-daemon
 
       - name: Verify APK contains no neural weights
+        shell: bash
         run: |
+          set -euo pipefail
           find app/build/outputs/apk -type f -name '*.apk' -print -exec du -h {} \;
-          if unzip -l app/build/outputs/apk/debug/app-arm64-v8a-debug.apk | grep -E 'assets/models|model.onnx|final.mdl|Gr.fst|silero_vad'; then
+          if unzip -l app/build/outputs/apk/debug/app-arm64-v8a-debug.apk | grep -Eq 'assets/models|model\.onnx|final\.mdl|Gr\.fst|silero_vad'; then
             echo 'ERROR: model weights leaked into base APK'
             exit 1
           fi
 
-      - name: Build individual offline language packs
+      - name: Build Hindi offline language pack
+        shell: bash
         run: |
           set -euo pipefail
+          rm -rf app/src/main/assets/models build/current-pack
+          python3 tools/fetch_models.py --stt hi --tts hi
+          mkdir -p build/current-pack/models
+          cp -a app/src/main/assets/models/. build/current-pack/models/
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          Path('build/current-pack/pack.json').write_text(json.dumps({
+              'format_version': 1,
+              'language': 'hi',
+              'offline': True,
+              'stt': True,
+              'tts': True,
+              'vad': True,
+              'runtime': 'Vosk + sherpa-onnx + ONNX Runtime'
+          }, indent=2) + '\n', encoding='utf-8')
+          PY
           mkdir -p build/model-packs
-          for spec in 'hi:hi:hi' 'en:en:en' 'mr:none:mr'; do
-            IFS=: read -r name stt tts <<< "$spec"
-            rm -rf app/src/main/assets/models
-            python3 tools/fetch_models.py --stt "$stt" --tts "$tts"
-            mkdir -p "build/model-packs/$name/models"
-            cp -a app/src/main/assets/models/. "build/model-packs/$name/models/"
-            cat > "build/model-packs/$name/pack.json" <<EOF
-{
-  "format_version": 1,
-  "language": "$name",
-  "offline": true,
-  "stt": "$([ "$stt" = none ] && echo false || echo true)",
-  "tts": true,
-  "vad": true,
-  "runtime": "Vosk + sherpa-onnx + ONNX Runtime"
-}
-EOF
-            echo "=== $name pack footprint ==="
-            du -sh "build/model-packs/$name"
-            cd "build/model-packs/$name"
-            zip -qr "../itantra-offline-$name-pack.zip" pack.json models
-            cd ../../..
-            rm -rf "build/model-packs/$name"
-          done
-          rm -rf app/src/main/assets/models
-          ls -lh build/model-packs/*.zip
+          cd build/current-pack
+          zip -qr ../model-packs/itantra-offline-hi-pack.zip pack.json models
+          cd ../..
+          rm -rf build/current-pack app/src/main/assets/models
 
-      - name: Validate each language pack
+      - name: Build English offline language pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf app/src/main/assets/models build/current-pack
+          python3 tools/fetch_models.py --stt en --tts en
+          mkdir -p build/current-pack/models
+          cp -a app/src/main/assets/models/. build/current-pack/models/
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          Path('build/current-pack/pack.json').write_text(json.dumps({
+              'format_version': 1,
+              'language': 'en',
+              'offline': True,
+              'stt': True,
+              'tts': True,
+              'vad': True,
+              'runtime': 'Vosk + sherpa-onnx + ONNX Runtime'
+          }, indent=2) + '\n', encoding='utf-8')
+          PY
+          mkdir -p build/model-packs
+          cd build/current-pack
+          zip -qr ../model-packs/itantra-offline-en-pack.zip pack.json models
+          cd ../..
+          rm -rf build/current-pack app/src/main/assets/models
+
+      - name: Build Marathi offline language pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf app/src/main/assets/models build/current-pack
+          python3 tools/fetch_models.py --stt none --tts mr
+          mkdir -p build/current-pack/models
+          cp -a app/src/main/assets/models/. build/current-pack/models/
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          Path('build/current-pack/pack.json').write_text(json.dumps({
+              'format_version': 1,
+              'language': 'mr',
+              'offline': True,
+              'stt': False,
+              'tts': True,
+              'vad': True,
+              'runtime': 'sherpa-onnx + ONNX Runtime'
+          }, indent=2) + '\n', encoding='utf-8')
+          PY
+          mkdir -p build/model-packs
+          cd build/current-pack
+          zip -qr ../model-packs/itantra-offline-mr-pack.zip pack.json models
+          cd ../..
+          rm -rf build/current-pack app/src/main/assets/models
+
+      - name: Validate language packs
+        shell: bash
         run: |
           set -euo pipefail
           for name in hi en mr; do
-            test -f "build/model-packs/itantra-offline-$name-pack.zip"
-            unzip -t "build/model-packs/itantra-offline-$name-pack.zip" >/dev/null
-            unzip -p "build/model-packs/itantra-offline-$name-pack.zip" pack.json | grep -q "\"language\": \"$name\""
-            unzip -l "build/model-packs/itantra-offline-$name-pack.zip" | grep -q 'models/vad/silero_vad.onnx'
+            archive="build/model-packs/itantra-offline-${name}-pack.zip"
+            test -f "$archive"
+            unzip -t "$archive" >/dev/null
+            unzip -p "$archive" pack.json | grep -q "\"language\": \"${name}\""
+            unzip -l "$archive" | grep -q 'models/vad/silero_vad.onnx'
           done
+          ls -lh build/model-packs/*.zip
 
       - name: Upload APK and separate offline language packs
         uses: actions/upload-artifact@v4
