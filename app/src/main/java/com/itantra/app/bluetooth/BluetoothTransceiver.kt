@@ -17,10 +17,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import java.io.BufferedWriter
 import java.io.IOException
+import java.io.OutputStreamWriter
 import java.util.UUID
 
-/** Classic Bluetooth RFCOMM transport. Only UTF-8 text crosses the radio link. */
 class BluetoothTransceiver(
     context: Context,
     private val onTextReceived: (String) -> Unit,
@@ -28,234 +29,125 @@ class BluetoothTransceiver(
     private val onDevicesChanged: (List<BluetoothDevice>) -> Unit,
     private val onError: (String) -> Unit,
 ) {
-    companion object {
-        val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
-        const val SERVICE_NAME = "iTantraWalkieLink"
-    }
-
+    companion object { val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB"); const val SERVICE_NAME = "iTantraWalkieLink" }
     private val appContext = context.applicationContext
-    private val adapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
+    private val adapter = BluetoothAdapter.getDefaultAdapter()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var serverSocket: BluetoothServerSocket? = null
-    private var activeSocket: BluetoothSocket? = null
+    @Volatile private var activeSocket: BluetoothSocket? = null
+    private var writer: BufferedWriter? = null
     private var receiverRegistered = false
     private val devices = linkedMapOf<String, BluetoothDevice>()
 
     private val receiver = object : BroadcastReceiver() {
-        @SuppressLint("MissingPermission")
-        override fun onReceive(context: Context, intent: Intent) {
+        @SuppressLint("MissingPermission") override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
                 BluetoothDevice.ACTION_FOUND -> {
-                    val device = if (Build.VERSION.SDK_INT >= 33) {
-                        intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
-                    } else {
-                        @Suppress("DEPRECATION") intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
-                    }
-                    if (device != null) {
-                        devices[device.address] = device
-                        publishDevices()
-                    }
+                    val device = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                    else @Suppress("DEPRECATION") intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                    if (device != null) { devices[device.address] = device; publishDevices() }
                 }
                 BluetoothAdapter.ACTION_DISCOVERY_STARTED -> onStateChanged(BtConnectionState.SCANNING)
-                BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
-                    if (activeSocket == null) onStateChanged(BtConnectionState.DISCONNECTED)
-                    publishDevices()
-                }
+                BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> { if (activeSocket == null) onStateChanged(BtConnectionState.DISCONNECTED); publishDevices() }
             }
         }
     }
 
-    init {
-        registerReceiver()
-        loadBondedDevices()
-    }
+    init { registerReceiver(); loadBondedDevices() }
 
-    @SuppressLint("MissingPermission")
-    private fun registerReceiver() {
+    @SuppressLint("MissingPermission") private fun registerReceiver() {
         if (receiverRegistered || adapter == null) return
-        val filter = IntentFilter().apply {
-            addAction(BluetoothDevice.ACTION_FOUND)
-            addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED)
-            addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
-        }
+        val filter = IntentFilter().apply { addAction(BluetoothDevice.ACTION_FOUND); addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED); addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED) }
         try {
-            if (Build.VERSION.SDK_INT >= 33) {
-                appContext.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                @Suppress("DEPRECATION") appContext.registerReceiver(receiver, filter)
-            }
+            if (Build.VERSION.SDK_INT >= 33) appContext.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            else @Suppress("DEPRECATION") appContext.registerReceiver(receiver, filter)
             receiverRegistered = true
-        } catch (e: Exception) {
-            onError("Bluetooth receiver setup failed: ${e.message}")
-        }
+        } catch (e: Exception) { onError("Bluetooth receiver setup failed: ${e.message}") }
     }
 
-    @SuppressLint("MissingPermission")
-    private fun loadBondedDevices() {
-        try {
-            adapter?.bondedDevices?.forEach { devices[it.address] = it }
-            publishDevices()
-        } catch (e: SecurityException) {
-            onError("Bluetooth permission is required to read paired devices")
-        }
+    @SuppressLint("MissingPermission") private fun loadBondedDevices() {
+        try { adapter?.bondedDevices?.forEach { devices[it.address] = it }; publishDevices() }
+        catch (_: SecurityException) { onError("Bluetooth permission is required to read paired devices") }
     }
 
-    @SuppressLint("MissingPermission")
-    fun startDiscovery() {
-        val bt = adapter ?: run {
-            onError("This phone does not support Bluetooth")
-            return
-        }
+    @SuppressLint("MissingPermission") fun startDiscovery() {
+        val bt = adapter ?: return onError("This phone does not support Bluetooth")
         try {
-            if (!bt.isEnabled) {
-                onError("Turn on Bluetooth first")
-                return
-            }
-            devices.clear()
-            bt.bondedDevices?.forEach { devices[it.address] = it }
-            publishDevices()
-            bt.cancelDiscovery()
-            onStateChanged(BtConnectionState.SCANNING)
+            if (!bt.isEnabled) return onError("Turn on Bluetooth first")
+            devices.clear(); bt.bondedDevices?.forEach { devices[it.address] = it }; publishDevices()
+            bt.cancelDiscovery(); onStateChanged(BtConnectionState.SCANNING)
             if (!bt.startDiscovery()) onError("Bluetooth discovery could not start")
-        } catch (e: SecurityException) {
-            onError("Bluetooth scan permission was denied")
-        }
+        } catch (_: SecurityException) { onError("Bluetooth scan permission was denied") }
     }
 
-    @SuppressLint("MissingPermission")
-    fun startAsServer(activity: Activity) {
-        val bt = adapter ?: run {
-            onError("This phone does not support Bluetooth")
-            return
-        }
+    @SuppressLint("MissingPermission") fun startAsServer(activity: Activity) {
+        val bt = adapter ?: return onError("This phone does not support Bluetooth")
         try {
-            if (!bt.isEnabled) {
-                onError("Turn on Bluetooth first")
-                return
-            }
-            // A listening RFCOMM socket does not itself make the phone discoverable.
-            // Request temporary discoverability so the other phone can find it.
-            val discoverable = Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE).apply {
-                putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300)
-            }
-            activity.startActivity(discoverable)
+            if (!bt.isEnabled) return onError("Turn on Bluetooth first")
+            activity.startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE).putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300))
             onStateChanged(BtConnectionState.SCANNING)
             scope.launch {
                 try {
-                    serverSocket?.close()
-                    serverSocket = bt.listenUsingRfcommWithServiceRecord(SERVICE_NAME, SPP_UUID)
-                    val socket = serverSocket?.accept()
-                    if (socket == null) {
-                        onStateChanged(BtConnectionState.DISCONNECTED)
-                        return@launch
-                    }
-                    activeSocket = socket
-                    onStateChanged(BtConnectionState.CONNECTED)
-                    listenLoop(socket)
+                    serverSocket?.close(); serverSocket = bt.listenUsingRfcommWithServiceRecord(SERVICE_NAME, SPP_UUID)
+                    val socket = serverSocket?.accept() ?: return@launch
+                    attachSocket(socket)
                 } catch (e: IOException) {
-                    activeSocket = null
-                    if (e.message?.contains("socket closed", ignoreCase = true) != true) {
-                        onError("Bluetooth host failed: ${e.message}")
-                    }
-                    onStateChanged(BtConnectionState.DISCONNECTED)
-                } catch (e: SecurityException) {
-                    onError("Bluetooth connect/advertise permission was denied")
-                    onStateChanged(BtConnectionState.DISCONNECTED)
-                }
+                    if (e.message?.contains("socket closed", true) != true) onError("Bluetooth host failed: ${e.message}")
+                    if (activeSocket == null) onStateChanged(BtConnectionState.DISCONNECTED)
+                } catch (_: SecurityException) { onError("Bluetooth connect/advertise permission was denied") }
             }
-        } catch (e: SecurityException) {
-            onError("Bluetooth permission was denied")
-        }
+        } catch (_: SecurityException) { onError("Bluetooth permission was denied") }
     }
 
-    @SuppressLint("MissingPermission")
-    fun connectToDevice(device: BluetoothDevice) {
+    @SuppressLint("MissingPermission") fun connectToDevice(device: BluetoothDevice) {
         onStateChanged(BtConnectionState.CONNECTING)
         scope.launch {
             var socket: BluetoothSocket? = null
             try {
-                adapter?.cancelDiscovery()
-                activeSocket?.close()
-                socket = device.createRfcommSocketToServiceRecord(SPP_UUID)
-                socket.connect()
-                activeSocket = socket
-                onStateChanged(BtConnectionState.CONNECTED)
-                listenLoop(socket)
+                adapter?.cancelDiscovery(); closeSocketOnly()
+                socket = device.createRfcommSocketToServiceRecord(SPP_UUID); socket.connect(); attachSocket(socket)
             } catch (e: IOException) {
                 try { socket?.close() } catch (_: IOException) { }
-                activeSocket = null
-                onError("Could not connect to ${safeName(device)}. Pair the phones in Android Bluetooth settings first, then retry.")
+                onError("Could not connect to ${safeName(device)}. Pair both phones in Android Bluetooth settings first.")
                 onStateChanged(BtConnectionState.DISCONNECTED)
-            } catch (e: SecurityException) {
-                onError("Bluetooth connect permission was denied")
-                onStateChanged(BtConnectionState.DISCONNECTED)
-            }
+            } catch (_: SecurityException) { onError("Bluetooth connect permission was denied"); onStateChanged(BtConnectionState.DISCONNECTED) }
         }
+    }
+
+    private fun attachSocket(socket: BluetoothSocket) {
+        activeSocket = socket
+        synchronized(this) { writer = BufferedWriter(OutputStreamWriter(socket.outputStream, Charsets.UTF_8)) }
+        onStateChanged(BtConnectionState.CONNECTED)
+        listenLoop(socket)
     }
 
     fun sendText(text: String) {
         scope.launch {
             try {
-                val socket = activeSocket ?: run {
-                    onError("Bluetooth is not connected")
-                    return@launch
-                }
-                socket.outputStream.buffered().use { out ->
-                    out.write((text.replace("\n", " ") + "\n").toByteArray(Charsets.UTF_8))
-                    out.flush()
-                }
-            } catch (e: IOException) {
-                onError("Bluetooth send failed: ${e.message}")
-                onStateChanged(BtConnectionState.DISCONNECTED)
-            }
+                val out = synchronized(this@BluetoothTransceiver) { writer }
+                    ?: return@launch onError("Bluetooth is not connected")
+                synchronized(this@BluetoothTransceiver) { out.write(text.replace("\n", " ")); out.newLine(); out.flush() }
+            } catch (e: IOException) { onError("Bluetooth send failed: ${e.message}"); disconnect() }
         }
     }
 
     private fun listenLoop(socket: BluetoothSocket) {
         try {
-            socket.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    if (line.isNotBlank()) onTextReceived(line)
-                }
-            }
-        } catch (e: IOException) {
-            if (activeSocket === socket) {
-                activeSocket = null
-                onStateChanged(BtConnectionState.DISCONNECTED)
-            }
-        }
+            socket.inputStream.bufferedReader(Charsets.UTF_8).use { reader -> while (true) { val line = reader.readLine() ?: break; if (line.isNotBlank()) onTextReceived(line) } }
+        } catch (_: IOException) { }
+        finally { if (activeSocket === socket) { closeSocketOnly(); onStateChanged(BtConnectionState.DISCONNECTED) } }
     }
 
-    @SuppressLint("MissingPermission")
-    private fun publishDevices() {
-        val snapshot = devices.values.sortedWith(compareBy({ safeName(it) }, { it.address }))
-        onDevicesChanged(snapshot)
+    @SuppressLint("MissingPermission") private fun publishDevices() {
+        onDevicesChanged(devices.values.sortedWith(compareBy({ safeName(it) }, { it.address })))
     }
+    @SuppressLint("MissingPermission") fun safeName(device: BluetoothDevice): String = try { device.name?.takeIf { it.isNotBlank() } ?: device.address } catch (_: SecurityException) { device.address }
 
-    @SuppressLint("MissingPermission")
-    fun safeName(device: BluetoothDevice): String =
-        try { device.name?.takeIf { it.isNotBlank() } ?: device.address } catch (_: SecurityException) { device.address }
-
-    fun disconnect() {
-        try {
-            activeSocket?.close()
-            serverSocket?.close()
-            adapter?.cancelDiscovery()
-        } catch (_: Exception) {
-        } finally {
-            activeSocket = null
-            serverSocket = null
-            onStateChanged(BtConnectionState.DISCONNECTED)
-        }
+    private fun closeSocketOnly() {
+        try { writer?.close() } catch (_: Exception) { }
+        try { activeSocket?.close() } catch (_: Exception) { }
+        writer = null; activeSocket = null
     }
-
-    fun close() {
-        disconnect()
-        if (receiverRegistered) {
-            try { appContext.unregisterReceiver(receiver) } catch (_: Exception) { }
-            receiverRegistered = false
-        }
-        scope.cancel()
-    }
+    fun disconnect() { try { serverSocket?.close(); adapter?.cancelDiscovery() } catch (_: Exception) { }; closeSocketOnly(); onStateChanged(BtConnectionState.DISCONNECTED) }
+    fun close() { disconnect(); if (receiverRegistered) try { appContext.unregisterReceiver(receiver) } catch (_: Exception) { }; receiverRegistered = false; scope.cancel() }
 }
