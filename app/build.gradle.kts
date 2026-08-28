@@ -12,7 +12,6 @@ android {
         targetSdk = 34
         versionCode = 3
         versionName = "0.3-offline-ml-stable"
-        ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a") }
     }
 
     splits {
@@ -33,8 +32,6 @@ android {
         debug { isMinifyEnabled = false }
     }
 
-    // Compress model assets. Shipping every ONNX/Vosk file uncompressed was a
-    // major contributor to the 400+ MB package.
     aaptOptions { noCompress.clear() }
 
     compileOptions {
