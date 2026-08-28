@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch compact real offline model packs for the iTantra demo APK."""
+"""Fetch compact real offline model packs for iTantra."""
 from __future__ import annotations
 import argparse, io, json, shutil, tarfile, urllib.request, zipfile
 from pathlib import Path
@@ -9,7 +9,7 @@ STT_PACKS={"hi":"vosk-model-small-hi-0.22.zip","en":"vosk-model-small-en-in-0.4.
 TTS_PACKS={"hi":"vits-piper-hi_IN-priyamvada-medium.tar.bz2","en":"vits-piper-en_US-amy-medium.tar.bz2","bn":"vits-piper-bn_BD-google-medium.tar.bz2","ml":"vits-piper-ml_IN-arjun-medium.tar.bz2","te":"vits-piper-te_IN-maya-medium.tar.bz2"}
 PIPER_TTS_PACKS={"mr":{"onnx":"mr/mr_IN/google/medium/mr_IN-google-medium.onnx","config":"mr/mr_IN/google/medium/mr_IN-google-medium.onnx.json"}}
 def download(url):
- req=urllib.request.Request(url,headers={"User-Agent":"iTantra-model-fetcher/2.1"}); last=None
+ req=urllib.request.Request(url,headers={"User-Agent":"iTantra-model-fetcher/3.0"}); last=None
  for attempt in range(1,6):
   try:
    print(f"GET {url}")
@@ -53,57 +53,42 @@ def ensure_shared_espeak_data():
  if not candidate.is_dir(): candidate=dirs[0] if len(dirs)==1 else None
  if candidate is None: raise RuntimeError("Unexpected espeak-ng-data archive layout")
  shutil.rmtree(target,ignore_errors=True); target.parent.mkdir(parents=True,exist_ok=True); shutil.move(str(candidate),str(target)); shutil.rmtree(tmp,ignore_errors=True)
- # eSpeak's binary core data is required by sherpa-onnx; only keep the
- # dictionaries/voice language data needed by the three demo languages.
  keep_files={"version","phondata","phonindex","phontab","intonations","phondata-manifest","en_dict","hi_dict","mr_dict"}
  keep_roots={"lang","voices"}
  for child in list(target.iterdir()):
   if child.name in keep_files or child.name in keep_roots: continue
   if child.is_dir(): shutil.rmtree(child)
   else: child.unlink()
- # Piper's English/Hindi/Marathi voices resolve through these language groups.
- # Keep only groups used by the selected voices; if a future voice needs more,
- # expand this allowlist without changing the runtime architecture.
  lang_dir=target/"lang"
  if lang_dir.is_dir():
-  allowed={"gmw","inc"}
   for child in list(lang_dir.iterdir()):
-   if child.name not in allowed:
+   if child.name not in {"gmw","inc"}:
     if child.is_dir(): shutil.rmtree(child)
     else: child.unlink()
- # Keep only voice definitions relevant to English/US English/Hindi/Marathi.
- voices_dir=target/"voices"
- if voices_dir.is_dir():
-  for child in list(voices_dir.rglob("*")):
-   if child.is_file() and child.name not in {"!v","en","en-US","hi","mr"}: child.unlink()
 def fetch_vad():
  target=ASSETS/"vad/silero_vad.onnx"
  if not target.exists(): target.parent.mkdir(parents=True,exist_ok=True); target.write_bytes(download(f"{SHERPA_ASR_BASE}/silero_vad.onnx"))
 def fetch_stt(languages):
  for lang in languages:
+  if lang=="none": continue
   archive=STT_PACKS[lang]; destination=ASSETS/"vosk"/lang
   if (destination/"am").exists() and (destination/"conf").exists(): continue
   destination.mkdir(parents=True,exist_ok=True); extract_vosk(download(f"{VOSK_BASE}/{archive}"),destination,archive[:-4])
-def write_source(destination,source):
- (destination/"MODEL_SOURCE.json").write_text(json.dumps({"source":source,"runtime":"sherpa-onnx VITS","offline_runtime":True},indent=2),encoding="utf-8")
+def write_source(destination,source,kind):
+ (destination/"MODEL_SOURCE.json").write_text(json.dumps({"source":source,"runtime":"sherpa-onnx VITS" if kind=="tts" else "Vosk","offline_runtime":True,"pack_kind":kind},indent=2),encoding="utf-8")
 def remove_embedded_espeak(destination):
  embedded=destination/"espeak-ng-data"
- if embedded.exists():
-  if embedded.is_dir(): shutil.rmtree(embedded)
-  else: embedded.unlink()
+ if embedded.exists(): shutil.rmtree(embedded) if embedded.is_dir() else embedded.unlink()
 def fetch_sherpa_tts(lang,archive):
  destination=ASSETS/"tts"/lang
- if (destination/"model.onnx").exists() and (destination/"tokens.txt").exists(): return
  destination.mkdir(parents=True,exist_ok=True); extract_tgz(download(f"{SHERPA_TTS_BASE}/{archive}"),destination)
  models=sorted(destination.glob("*.onnx")); tokens=destination/"tokens.txt"
  if not models or not tokens.exists(): raise RuntimeError(f"Incomplete TTS pack: {archive}")
  if models[0].name!="model.onnx": models[0].rename(destination/"model.onnx")
- remove_embedded_espeak(destination)
- write_source(destination,archive)
+ remove_embedded_espeak(destination); write_source(destination,archive,"tts")
 def fetch_piper_tts(lang,pack):
- destination=ASSETS/"tts"/lang
- if (destination/"model.onnx").exists() and (destination/"tokens.txt").exists(): return
- destination.mkdir(parents=True,exist_ok=True); source_model=destination/".source.onnx"; source_config=destination/".source.onnx.json"
+ destination=ASSETS/"tts"/lang; destination.mkdir(parents=True,exist_ok=True)
+ source_model=destination/".source.onnx"; source_config=destination/".source.onnx.json"
  source_model.write_bytes(download(f"{PIPER_HF_BASE}/{pack['onnx']}")); source_config.write_bytes(download(f"{PIPER_HF_BASE}/{pack['config']}"))
  import onnx
  config=json.loads(source_config.read_text(encoding="utf-8")); ids=config.get("phoneme_id_map")
@@ -113,7 +98,7 @@ def fetch_piper_tts(lang,pack):
  model=onnx.load(str(source_model))
  for key,value in {"model_type":"vits","comment":"piper","language":config["language"]["name_english"],"voice":config["espeak"]["voice"],"has_espeak":1,"n_speakers":config["num_speakers"],"sample_rate":config["audio"]["sample_rate"]}.items():
   prop=model.metadata_props.add(); prop.key=key; prop.value=str(value)
- onnx.save(model,str(destination/"model.onnx")); write_source(destination,f"rhasspy/piper-voices/{pack['onnx']}"); source_model.unlink(missing_ok=True); source_config.unlink(missing_ok=True)
+ onnx.save(model,str(destination/"model.onnx")); write_source(destination,f"rhasspy/piper-voices/{pack['onnx']}","tts"); source_model.unlink(missing_ok=True); source_config.unlink(missing_ok=True)
 def fetch_tts(languages):
  ensure_shared_espeak_data()
  for lang in languages:
@@ -121,10 +106,13 @@ def fetch_tts(languages):
   elif lang in TTS_PACKS: fetch_sherpa_tts(lang,TTS_PACKS[lang])
   else: raise SystemExit(f"Unsupported TTS language: {lang}")
 def main():
- p=argparse.ArgumentParser(); p.add_argument("--stt",default="hi,en"); p.add_argument("--tts",default="hi,mr,en"); p.add_argument("--skip-vad",action="store_true"); a=p.parse_args()
+ p=argparse.ArgumentParser(); p.add_argument("--stt",default="hi"); p.add_argument("--tts",default="hi"); p.add_argument("--skip-vad",action="store_true"); a=p.parse_args()
  stt=[x.strip() for x in a.stt.split(",") if x.strip()]; tts=[x.strip() for x in a.tts.split(",") if x.strip()]
- if set(stt)-set(STT_PACKS) or set(tts)-(set(TTS_PACKS)|set(PIPER_TTS_PACKS)): raise SystemExit("Unsupported model pack requested")
+ if any(x not in STT_PACKS and x!="none" for x in stt): raise SystemExit("Unsupported STT model pack requested")
+ if any(x not in TTS_PACKS and x not in PIPER_TTS_PACKS for x in tts): raise SystemExit("Unsupported TTS model pack requested")
+ if not stt and not tts: raise SystemExit("At least one STT or TTS model must be requested")
  ASSETS.mkdir(parents=True,exist_ok=True)
  if not a.skip_vad: fetch_vad()
- fetch_stt(stt); fetch_tts(tts); print("Compact real offline model packs are ready")
+ fetch_stt(stt); fetch_tts(tts)
+ print("Single-language real offline model pack is ready")
 if __name__=="__main__": main()
