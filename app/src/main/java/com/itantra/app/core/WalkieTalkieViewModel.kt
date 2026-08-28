@@ -16,29 +16,15 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-/**
- * This is the single most important file for demo day: it is the literal
- * implementation of the pipeline diagram we designed —
- *
- *   Mic -> VAD -> STT -> (finalize on pause) -> Bluetooth send (text)
- *   Bluetooth receive (text) -> TTS -> AudioPlayer
- *
- * A simple alert-keyword check decides whether incoming speech is played back
- * as a normal "voice note" or as a non-interruptible max-volume alert — swap
- * `ALERT_KEYWORDS` for whatever your actual distress-trigger design ends up being
- * (e.g. a dedicated "SOS" button instead of keyword detection is simpler and more
- * reliable for a live demo).
- */
 class WalkieTalkieViewModel(application: Application) : AndroidViewModel(application) {
-
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState
 
-    private val sttEngine: SttEngine = VoskSttEngine(application)
-    private val ttsEngine: TtsEngine = OnnxVitsTtsEngine(application)
-    private val vad = SileroVad(application)
+    // Speech engines are deliberately lazy: a bad native/model asset must never crash app startup.
+    private val sttEngine: Lazy<SttEngine> = lazy { VoskSttEngine(application) }
+    private val ttsEngine: Lazy<TtsEngine> = lazy { OnnxVitsTtsEngine(application) }
+    private val vad: Lazy<SileroVad> = lazy { SileroVad(application) }
     private val audioPlayer = AudioPlayer(application)
-
     private var recorder: AudioRecorder? = null
     private var pcmFloatBuffer = FloatArray(512)
 
@@ -51,112 +37,102 @@ class WalkieTalkieViewModel(application: Application) : AndroidViewModel(applica
 
     fun loadModels(language: SupportedLanguage) {
         viewModelScope.launch {
-            sttEngine.loadModel(language)
-            ttsEngine.loadModel(language)
-            _uiState.update { it.copy(language = language) }
+            runCatching {
+                sttEngine.value.loadModel(language)
+                ttsEngine.value.loadModel(language)
+            }.onSuccess {
+                _uiState.update { it.copy(language = language, errorMessage = null) }
+            }.onFailure { error ->
+                _uiState.update {
+                    it.copy(errorMessage = "Offline model failed to initialize: ${error.message ?: error::class.java.simpleName}")
+                }
+            }
         }
     }
 
     fun setMode(mode: OperatingMode) {
         _uiState.update { it.copy(mode = mode) }
         if (mode == OperatingMode.NORMAL_PHONE) {
-            stopListening()
-            bluetooth.disconnect()
+            stopListening(); bluetooth.disconnect()
         }
     }
 
     fun startAsHost() = bluetooth.startAsServer()
     fun connectAsClient(deviceMac: String) {
-        val adapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter()
-        val device = adapter?.getRemoteDevice(deviceMac)
-        device?.let { bluetooth.connectToDevice(it) }
+        android.bluetooth.BluetoothAdapter.getDefaultAdapter()?.getRemoteDevice(deviceMac)?.let {
+            bluetooth.connectToDevice(it)
+        }
     }
 
-    /** Call on push-to-talk button DOWN. */
     fun onPushToTalkStart() {
         if (_uiState.value.mode != OperatingMode.WALKIE_TALKIE) return
-        _uiState.update { it.copy(talkState = TalkState.LISTENING_FOR_SPEECH, partialTranscript = "") }
-        vad.reset()
-
-        recorder = AudioRecorder { pcm, size -> onMicFrame(pcm, size) }.also { it.start() }
+        viewModelScope.launch {
+            try {
+                // Ensure the selected language models are ready before opening the mic.
+                if (!sttEngine.isInitialized() || !ttsEngine.isInitialized()) {
+                    loadModels(_uiState.value.language)
+                    return@launch
+                }
+                vad.value.reset()
+                _uiState.update { it.copy(talkState = TalkState.LISTENING_FOR_SPEECH, partialTranscript = "", errorMessage = null) }
+                recorder = AudioRecorder { pcm, size -> onMicFrame(pcm, size) }.also { it.start() }
+            } catch (error: Throwable) {
+                _uiState.update { it.copy(talkState = TalkState.IDLE, errorMessage = "Microphone/ML initialization failed: ${error.message ?: error::class.java.simpleName}") }
+            }
+        }
     }
 
-    /** Call on push-to-talk button UP — also triggered automatically if VAD detects
-     *  a sustained pause before release, per the PS's "detects pauses and stoppages" spec. */
     fun onPushToTalkEnd() {
-        recorder?.stop()
-        recorder = null
-
+        recorder?.stop(); recorder = null
         viewModelScope.launch {
-            val start = System.currentTimeMillis()
-            val result = sttEngine.finalizeUtterance()
-            val sttLatency = System.currentTimeMillis() - start
-
-            _uiState.update {
-                it.copy(
-                    talkState = TalkState.TRANSMITTING,
-                    lastFinalTranscript = result.text,
-                    lastSttLatencyMs = sttLatency
-                )
+            runCatching {
+                val start = System.currentTimeMillis()
+                val result = sttEngine.value.finalizeUtterance()
+                val latency = System.currentTimeMillis() - start
+                _uiState.update { it.copy(talkState = TalkState.TRANSMITTING, lastFinalTranscript = result.text, lastSttLatencyMs = latency) }
+                if (result.text.isNotBlank()) bluetooth.sendText(result.text)
+                _uiState.update { it.copy(talkState = TalkState.IDLE) }
+            }.onFailure { error ->
+                _uiState.update { it.copy(talkState = TalkState.IDLE, errorMessage = "STT failed: ${error.message ?: error::class.java.simpleName}") }
             }
-
-            if (result.text.isNotBlank()) {
-                bluetooth.sendText(result.text)
-            }
-            _uiState.update { it.copy(talkState = TalkState.IDLE) }
         }
     }
 
     private fun onMicFrame(pcm: ShortArray, size: Int) {
-        // Feed STT continuously (streaming/incremental decoding lowers perceived latency).
-        sttEngine.acceptAudioFrame(pcm, size)
-        _uiState.update {
-            // Cheap partial preview; the engine also pushes results via observePartialResults().
-            it
-        }
-
-        // Feed VAD in parallel to detect a pause/stop mid-hold (not just on button release).
+        if (!sttEngine.isInitialized() || !vad.isInitialized()) return
+        sttEngine.value.acceptAudioFrame(pcm, size)
         if (pcmFloatBuffer.size != size) pcmFloatBuffer = FloatArray(size)
         for (i in 0 until size) pcmFloatBuffer[i] = pcm[i] / 32768f
-        val vadResult = vad.processChunk(pcmFloatBuffer)
-        if (vadResult.utteranceEnded && _uiState.value.talkState == TalkState.LISTENING_FOR_SPEECH) {
-            onPushToTalkEnd()
+        runCatching { vad.value.processChunk(pcmFloatBuffer) }.onSuccess { result ->
+            if (result.utteranceEnded && _uiState.value.talkState == TalkState.LISTENING_FOR_SPEECH) onPushToTalkEnd()
+        }.onFailure { error ->
+            _uiState.update { it.copy(errorMessage = "VAD failed: ${error.message ?: error::class.java.simpleName}") }
         }
     }
 
     private fun handleIncomingText(text: String) {
         _uiState.update { it.copy(talkState = TalkState.RECEIVING, lastReceivedText = text) }
         viewModelScope.launch {
-            val receivedAt = System.currentTimeMillis()
-            val ttsResult = ttsEngine.synthesize(text)
-
-            val isAlert = ALERT_KEYWORDS.any { kw -> text.contains(kw, ignoreCase = true) }
-            _uiState.update {
-                it.copy(
-                    talkState = TalkState.PLAYING_ALERT,
-                    lastTtsLatencyMs = ttsResult.processingTimeMs,
-                    lastEndToEndMs = System.currentTimeMillis() - receivedAt
-                )
+            runCatching {
+                val receivedAt = System.currentTimeMillis()
+                if (!ttsEngine.isInitialized()) throw IllegalStateException("TTS model is not loaded")
+                val result = ttsEngine.value.synthesize(text)
+                val alert = ALERT_KEYWORDS.any { text.contains(it, ignoreCase = true) }
+                _uiState.update { it.copy(talkState = TalkState.PLAYING_ALERT, lastTtsLatencyMs = result.processingTimeMs, lastEndToEndMs = System.currentTimeMillis() - receivedAt) }
+                if (alert) audioPlayer.playAlert(result.pcm16, result.sampleRate) else audioPlayer.playVoiceNote(result.pcm16, result.sampleRate)
+                _uiState.update { it.copy(talkState = TalkState.IDLE) }
+            }.onFailure { error ->
+                _uiState.update { it.copy(talkState = TalkState.IDLE, errorMessage = "TTS failed: ${error.message ?: error::class.java.simpleName}") }
             }
-
-            if (isAlert) {
-                audioPlayer.playAlert(ttsResult.pcm16, ttsResult.sampleRate)
-            } else {
-                audioPlayer.playVoiceNote(ttsResult.pcm16, ttsResult.sampleRate)
-            }
-            _uiState.update { it.copy(talkState = TalkState.IDLE) }
         }
     }
 
-    private fun stopListening() {
-        recorder?.stop()
-        recorder = null
-    }
+    private fun stopListening() { recorder?.stop(); recorder = null }
 
     override fun onCleared() {
-        sttEngine.release()
-        ttsEngine.release()
-        vad.release()
+        if (sttEngine.isInitialized()) sttEngine.value.release()
+        if (ttsEngine.isInitialized()) ttsEngine.value.release()
+        if (vad.isInitialized()) vad.value.release()
         bluetooth.disconnect()
     }
 }
