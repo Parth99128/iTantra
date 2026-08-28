@@ -1,6 +1,7 @@
 package com.itantra.app.tts
 
 import android.content.Context
+import com.itantra.app.core.ModelPackManager
 import com.itantra.app.core.SupportedLanguage
 import com.k2fsa.sherpa.onnx.GenerationConfig
 import com.k2fsa.sherpa.onnx.OfflineTts
@@ -8,30 +9,27 @@ import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
 import java.io.File
-import java.io.FileOutputStream
 
-/** Real offline Piper/VITS inference through sherpa-onnx.
- *
- * Model weights stay in APK assets. sherpa's Android implementation needs
- * espeak-ng-data on the filesystem, so the shared phonemizer data is copied once
- * to the app's private files directory and reused by all language packs.
- */
+/** Real offline Piper/VITS inference through sherpa-onnx using an installed local model pack. */
 class OnnxVitsTtsEngine(private val context: Context) : TtsEngine {
-
     private var tts: OfflineTts? = null
-
     override var outputSampleRate: Int = 22050
         private set
 
     override suspend fun loadModel(language: SupportedLanguage) {
-        val modelDir = "models/tts/${language.bcp47}"
-        val dataDir = copySharedEspeakData()
+        val root = ModelPackManager(context).rootDir()
+        val modelDir = File(root, "tts/${language.bcp47}")
+        require(File(modelDir, "model.onnx").exists()) { "Offline ${language.displayName} TTS pack is not installed" }
+        require(File(modelDir, "tokens.txt").exists()) { "Offline ${language.displayName} TTS tokens are missing" }
+        val dataDir = File(root, "tts/espeak-ng-data")
+        require(File(dataDir, "phontab").exists()) { "Offline TTS phonemizer data is missing" }
 
+        tts?.release()
         val config = OfflineTtsConfig(
             model = OfflineTtsModelConfig(
                 vits = OfflineTtsVitsModelConfig(
-                    model = "$modelDir/model.onnx",
-                    tokens = "$modelDir/tokens.txt",
+                    model = File(modelDir, "model.onnx").absolutePath,
+                    tokens = File(modelDir, "tokens.txt").absolutePath,
                     dataDir = dataDir.absolutePath,
                 ),
                 numThreads = 1,
@@ -39,57 +37,17 @@ class OnnxVitsTtsEngine(private val context: Context) : TtsEngine {
                 debug = false,
             )
         )
-
-        tts?.release()
-        tts = OfflineTts(assetManager = context.assets, config = config)
+        tts = OfflineTts(config)
         outputSampleRate = tts?.sampleRate() ?: 22050
     }
 
     override suspend fun synthesize(text: String): TtsResult {
-        val engine = tts ?: error("TTS model not loaded — call loadModel() first")
+        val engine = tts ?: error("TTS model not loaded — install an offline model pack first")
         val start = System.currentTimeMillis()
-        val audio = engine.generateWithConfig(
-            text = text,
-            config = GenerationConfig(speed = 1.0f, silenceScale = 0.2f),
-        )
+        val audio = engine.generateWithConfig(text = text, config = GenerationConfig(speed = 1.0f, silenceScale = 0.2f))
         val elapsed = System.currentTimeMillis() - start
-        val pcm16 = ShortArray(audio.samples.size) { i ->
-            (audio.samples[i].coerceIn(-1f, 1f) * Short.MAX_VALUE).toInt().toShort()
-        }
-        return TtsResult(
-            pcm16 = pcm16,
-            sampleRate = audio.sampleRate,
-            processingTimeMs = elapsed,
-        )
-    }
-
-    private fun copySharedEspeakData(): File {
-        val target = File(context.filesDir, "espeak-ng-data")
-        val marker = File(target, "phontab")
-        if (marker.exists()) return target
-
-        target.deleteRecursively()
-        copyAssetTree("models/tts/espeak-ng-data", target)
-        require(marker.exists()) {
-            "Offline TTS phonemizer data is missing or incomplete. Rebuild with the model provisioning workflow."
-        }
-        return target
-    }
-
-    private fun copyAssetTree(assetPath: String, destination: File) {
-        val children = context.assets.list(assetPath) ?: emptyArray()
-        if (children.isEmpty()) {
-            destination.parentFile?.mkdirs()
-            context.assets.open(assetPath).use { input ->
-                FileOutputStream(destination).use { output -> input.copyTo(output) }
-            }
-            return
-        }
-
-        destination.mkdirs()
-        for (child in children) {
-            copyAssetTree("$assetPath/$child", File(destination, child))
-        }
+        val pcm16 = ShortArray(audio.samples.size) { i -> (audio.samples[i].coerceIn(-1f, 1f) * Short.MAX_VALUE).toInt().toShort() }
+        return TtsResult(pcm16, audio.sampleRate, elapsed)
     }
 
     override fun release() {
