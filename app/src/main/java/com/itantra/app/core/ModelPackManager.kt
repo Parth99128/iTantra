@@ -5,36 +5,22 @@ import android.net.Uri
 import java.io.File
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
+import org.json.JSONObject
 
-/** Stores independent offline language packs in app-private storage. */
+/** Stores independently installed offline language packs in app-private storage. */
 class ModelPackManager(private val context: Context) {
-    companion object {
-        private const val PACK_DIR = "model-packs"
-        const val ROOT_NAME = "models"
-    }
-
+    companion object { private const val PACK_DIR = "model-packs" }
     private val root = File(context.filesDir, PACK_DIR)
 
     fun rootDir(): File = root
+    fun languageDir(language: SupportedLanguage): File = root
 
-    fun languageDir(language: SupportedLanguage): File = File(root, language.bcp47)
-
-    fun isInstalled(language: SupportedLanguage): Boolean {
-        val dir = languageDir(language)
-        val stt = File(dir, "vosk/${language.bcp47}/am").exists()
-        val tts = File(dir, "tts/${language.bcp47}/model.onnx").exists() &&
-            File(dir, "tts/${language.bcp47}/tokens.txt").exists()
-        return stt || tts
-    }
-
-    fun hasStt(language: SupportedLanguage): Boolean =
-        File(languageDir(language), "vosk/${language.bcp47}/am").exists()
-
+    fun isInstalled(language: SupportedLanguage): Boolean = hasStt(language) || hasTts(language)
+    fun hasStt(language: SupportedLanguage): Boolean = File(root, "vosk/${language.bcp47}/am").exists()
     fun hasTts(language: SupportedLanguage): Boolean =
-        File(languageDir(language), "tts/${language.bcp47}/model.onnx").exists() &&
-            File(languageDir(language), "tts/${language.bcp47}/tokens.txt").exists()
-
-    fun sharedVadFile(): File = File(root, "shared/vad/silero_vad.onnx")
+        File(root, "tts/${language.bcp47}/model.onnx").exists() &&
+            File(root, "tts/${language.bcp47}/tokens.txt").exists()
+    fun sharedVadFile(): File = File(root, "vad/silero_vad.onnx")
 
     @Synchronized
     fun installPack(uri: Uri) {
@@ -64,24 +50,31 @@ class ModelPackManager(private val context: Context) {
 
             val manifest = File(staging, "pack.json")
             require(manifest.exists()) { "Invalid iTantra pack: pack.json missing" }
-            val text = manifest.readText()
-            val language = Regex("\"language\"\\s*:\\s*\"([a-z-]+)\"").find(text)?.groupValues?.get(1)
-                ?: error("Invalid iTantra pack: language missing")
-            val stagedLanguage = File(staging, "models")
-            require(stagedLanguage.isDirectory) { "Invalid iTantra pack: models directory missing" }
-
-            val destination = languageDir(SupportedLanguage.values().firstOrNull { it.bcp47 == language }
-                ?: error("Unsupported language pack: $language"))
-            destination.deleteRecursively()
-            destination.parentFile?.mkdirs()
-            stagedLanguage.copyRecursively(destination, overwrite = true)
-
-            val stagedShared = File(staging, "shared")
-            if (stagedShared.isDirectory) {
-                stagedShared.copyRecursively(File(root, "shared"), overwrite = true)
+            val metadata = JSONObject(manifest.readText())
+            val language = metadata.optString("language")
+            require(SupportedLanguage.values().any { it.bcp47 == language }) {
+                "Unsupported language pack: $language"
             }
+            val stagedModels = File(staging, "models")
+            require(stagedModels.isDirectory) { "Invalid iTantra pack: models directory missing" }
+
+            // Merge this pack into the shared local store so Hindi/English/Marathi
+            // can be installed independently without deleting previously installed packs.
+            mergeRecursively(stagedModels, root)
         } finally {
             staging.deleteRecursively()
+        }
+    }
+
+    private fun mergeRecursively(source: File, destination: File) {
+        if (source.isDirectory) {
+            destination.mkdirs()
+            source.listFiles()?.forEach { mergeRecursively(it, File(destination, it.name)) }
+        } else {
+            source.inputStream().use { input ->
+                destination.parentFile?.mkdirs()
+                destination.outputStream().use { output -> input.copyTo(output) }
+            }
         }
     }
 
