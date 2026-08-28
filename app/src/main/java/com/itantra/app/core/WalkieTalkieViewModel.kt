@@ -19,12 +19,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class WalkieTalkieViewModel(application: Application) : AndroidViewModel(application) {
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState
-    private val packManager = ModelPackManager(application)
+    private val packManager: ModelPackManager = ModelPackManager(application)
     private val sttEngine: Lazy<SttEngine> = lazy { VoskSttEngine(application) }
     private val ttsEngine: Lazy<TtsEngine> = lazy { OnnxVitsTtsEngine(application) }
     private val vad: Lazy<SileroVad> = lazy { SileroVad(application) }
@@ -32,17 +31,23 @@ class WalkieTalkieViewModel(application: Application) : AndroidViewModel(applica
     private var recorder: AudioRecorder? = null
     private var pcmFloatBuffer = FloatArray(SileroVad.CHUNK_SAMPLES)
     private var currentActivity: Activity? = null
-    private val bluetooth = BluetoothTransceiver(
+    private val bluetooth: BluetoothTransceiver = createBluetooth(application)
+    private val alertKeywords = listOf("madad", "bachao", "help", "emergency", "sos", "आपात", "मदद", "बचाओ")
+
+    private fun createBluetooth(application: Application): BluetoothTransceiver = BluetoothTransceiver(
         application,
         onTextReceived = ::handleIncomingText,
-        onStateChanged = { state -> _uiState.update { it.copy(btState = state) } },
-        onDevicesChanged = { list ->
-            val peers = list.map { BluetoothPeer(it.address, bluetooth.safeName(it), it) }
+        onStateChanged = { state: BtConnectionState -> _uiState.update { it.copy(btState = state) } },
+        onDevicesChanged = { list: List<BluetoothDevice> ->
+            val peers = list.map { device -> BluetoothPeer(device.address, safeBluetoothName(device), device) }
             _uiState.update { it.copy(bluetoothDevices = peers) }
         },
-        onError = { message -> _uiState.update { it.copy(errorMessage = message) } }
+        onError = { message: String -> _uiState.update { it.copy(errorMessage = message) } }
     )
-    private val alertKeywords = listOf("madad", "bachao", "help", "emergency", "sos", "आपात", "मदद", "बचाओ")
+
+    @Suppress("MissingPermission")
+    private fun safeBluetoothName(device: BluetoothDevice): String =
+        try { device.name?.takeIf { it.isNotBlank() } ?: device.address } catch (_: SecurityException) { device.address }
 
     fun attachActivity(activity: Activity) { currentActivity = activity }
     fun setPermissionWarning(message: String?) { _uiState.update { it.copy(permissionWarning = message) } }
@@ -76,7 +81,7 @@ class WalkieTalkieViewModel(application: Application) : AndroidViewModel(applica
         if (mode == OperatingMode.NORMAL_PHONE) { stopListening(); bluetooth.disconnect() }
     }
     fun startDiscovery() = bluetooth.startDiscovery()
-    fun startAsHost() { currentActivity?.let(bluetooth::startAsServer) ?: _uiState.update { it.copy(errorMessage = "Bluetooth host is not ready") } }
+    fun startAsHost() { currentActivity?.let { bluetooth.startAsServer(it) } ?: _uiState.update { it.copy(errorMessage = "Bluetooth host is not ready") } }
     fun connectToPeer(peer: BluetoothPeer) = bluetooth.connectToDevice(peer.device)
     fun disconnectBluetooth() = bluetooth.disconnect()
 
@@ -87,7 +92,8 @@ class WalkieTalkieViewModel(application: Application) : AndroidViewModel(applica
                 val language = _uiState.value.language
                 require(packManager.hasStt(language)) { "${language.displayName} does not have an offline STT model installed" }
                 if (!sttEngine.isInitialized()) sttEngine.value.loadModel(language)
-                if (!vad.isInitialized()) vad.value.reset()
+                if (!vad.isInitialized()) vad.value
+                vad.value.reset()
                 _uiState.update { it.copy(talkState = TalkState.LISTENING_FOR_SPEECH, partialTranscript = "", errorMessage = null) }
                 recorder = AudioRecorder { pcm, size -> onMicFrame(pcm, size) }.also { it.start() }
             } catch (e: Throwable) { _uiState.update { it.copy(talkState = TalkState.IDLE, errorMessage = "Microphone/ML initialization failed: ${e.message}") } }
