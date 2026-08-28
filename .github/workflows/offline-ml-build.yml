@@ -49,21 +49,44 @@ jobs:
 
       - name: Build individual offline language packs
         run: |
+          set -euo pipefail
           mkdir -p build/model-packs
           for spec in 'hi:hi:hi' 'en:en:en' 'mr:none:mr'; do
             IFS=: read -r name stt tts <<< "$spec"
             rm -rf app/src/main/assets/models
             python3 tools/fetch_models.py --stt "$stt" --tts "$tts"
-            mkdir -p "build/model-packs/$name"
-            cp -a app/src/main/assets/models "build/model-packs/$name/models"
+            mkdir -p "build/model-packs/$name/models"
+            cp -a app/src/main/assets/models/. "build/model-packs/$name/models/"
+            cat > "build/model-packs/$name/pack.json" <<EOF
+{
+  "format_version": 1,
+  "language": "$name",
+  "offline": true,
+  "stt": "$([ "$stt" = none ] && echo false || echo true)",
+  "tts": true,
+  "vad": true,
+  "runtime": "Vosk + sherpa-onnx + ONNX Runtime"
+}
+EOF
             echo "=== $name pack footprint ==="
-            du -sh "build/model-packs/$name/models"
+            du -sh "build/model-packs/$name"
             cd "build/model-packs/$name"
-            zip -qr "../itantra-offline-$name-pack.zip" models
+            zip -qr "../itantra-offline-$name-pack.zip" pack.json models
             cd ../../..
+            rm -rf "build/model-packs/$name"
           done
           rm -rf app/src/main/assets/models
           ls -lh build/model-packs/*.zip
+
+      - name: Validate each language pack
+        run: |
+          set -euo pipefail
+          for name in hi en mr; do
+            test -f "build/model-packs/itantra-offline-$name-pack.zip"
+            unzip -t "build/model-packs/itantra-offline-$name-pack.zip" >/dev/null
+            unzip -p "build/model-packs/itantra-offline-$name-pack.zip" pack.json | grep -q "\"language\": \"$name\""
+            unzip -l "build/model-packs/itantra-offline-$name-pack.zip" | grep -q 'models/vad/silero_vad.onnx'
+          done
 
       - name: Upload APK and separate offline language packs
         uses: actions/upload-artifact@v4
