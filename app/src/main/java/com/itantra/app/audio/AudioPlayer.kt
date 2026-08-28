@@ -6,50 +6,55 @@ import android.media.AudioFormat
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 
-/**
- * Plays synthesized TTS audio. The PS explicitly distinguishes two behaviors:
- *   - "voice note" style playback for normal messages
- *   - "alert type messages announced at highest volume, non-interruptible" for distress alerts
- *
- * We implement the alert path using STREAM_ALARM + exclusive transient audio focus,
- * which is the correct Android-idiomatic way to override whatever else is playing —
- * this is a small detail that signals real platform knowledge to judges who check it.
- */
+/** Local PCM playback for voice notes, normal call-style voice, and emergency alerts. */
 class AudioPlayer(private val context: Context) {
-
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var focusRequest: AudioFocusRequest? = null
+    private var activeTrack: AudioTrack? = null
 
-    fun playVoiceNote(pcm16: ShortArray, sampleRate: Int) =
-        play(pcm16, sampleRate, isAlert = false)
+    fun playVoiceNote(pcm16: ShortArray, sampleRate: Int) = play(pcm16, sampleRate, Mode.VOICE_NOTE)
+    fun playCallVoice(pcm16: ShortArray, sampleRate: Int) = play(pcm16, sampleRate, Mode.CALL)
+    fun playAlert(pcm16: ShortArray, sampleRate: Int) = play(pcm16, sampleRate, Mode.ALERT)
 
-    fun playAlert(pcm16: ShortArray, sampleRate: Int) =
-        play(pcm16, sampleRate, isAlert = true)
+    private enum class Mode { VOICE_NOTE, CALL, ALERT }
 
-    private fun play(pcm16: ShortArray, sampleRate: Int, isAlert: Boolean) {
-        val usage = if (isAlert) AudioAttributes.USAGE_ALARM else AudioAttributes.USAGE_VOICE_COMMUNICATION
+    @Synchronized
+    private fun play(pcm16: ShortArray, sampleRate: Int, mode: Mode) {
+        if (pcm16.isEmpty() || sampleRate <= 0) return
+        stopActive()
+
+        val isAlert = mode == Mode.ALERT
+        val usage = when (mode) {
+            Mode.ALERT -> AudioAttributes.USAGE_ALARM
+            Mode.CALL -> AudioAttributes.USAGE_VOICE_COMMUNICATION
+            Mode.VOICE_NOTE -> AudioAttributes.USAGE_MEDIA
+        }
         val attrs = AudioAttributes.Builder()
             .setUsage(usage)
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .build()
 
         if (isAlert) {
-            // Push the alarm stream to max so the message is genuinely "highest volume."
-            val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM)
-            audioManager.setStreamVolume(AudioManager.STREAM_ALARM, maxVol, 0)
-
-            focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
-                .setAudioAttributes(attrs)
-                .setAcceptsDelayedFocusGain(false)
-                .setWillPauseWhenDucked(false)
-                .build()
-            audioManager.requestAudioFocus(focusRequest!!)
+            setMaxVolume(AudioManager.STREAM_ALARM)
+            requestFocus(attrs)
+        } else if (mode == Mode.CALL) {
+            // Use communication stream for phone-call style listening, while keeping
+            // the phone's normal call controls untouched.
+            requestFocus(attrs)
+        } else {
+            requestFocus(attrs)
         }
 
-        val bufferSize = AudioTrack.getMinBufferSize(
-            sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(pcm16.size * 2)
+        val minBuffer = AudioTrack.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        val bufferSize = minBuffer.coerceAtLeast(pcm16.size * 2).coerceAtLeast(4096)
 
         val track = AudioTrack.Builder()
             .setAudioAttributes(attrs)
@@ -64,15 +69,61 @@ class AudioPlayer(private val context: Context) {
             .setTransferMode(AudioTrack.MODE_STATIC)
             .build()
 
+        activeTrack = track
         track.write(pcm16, 0, pcm16.size)
+        track.setVolume(1.0f)
         track.play()
 
-        // Release focus once playback naturally finishes (rough estimate by duration;
-        // for production, listen for AudioTrack.getPlaybackHeadPosition() to be precise).
         val durationMs = (pcm16.size * 1000L) / sampleRate
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            track.release()
+        Handler(Looper.getMainLooper()).postDelayed({
+            synchronized(this) {
+                if (activeTrack === track) {
+                    try { track.stop() } catch (_: Exception) { }
+                    try { track.release() } catch (_: Exception) { }
+                    activeTrack = null
+                    abandonFocus()
+                }
+            }
+        }, durationMs + 300L)
+    }
+
+    private fun requestFocus(attrs: AudioAttributes) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
-        }, durationMs + 200)
+            focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                .setAudioAttributes(attrs)
+                .setAcceptsDelayedFocusGain(false)
+                .setWillPauseWhenDucked(false)
+                .build()
+            audioManager.requestAudioFocus(focusRequest!!)
+        } else {
+            @Suppress("DEPRECATION") audioManager.requestAudioFocus(null, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+        }
+    }
+
+    private fun abandonFocus() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            focusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+            focusRequest = null
+        } else {
+            @Suppress("DEPRECATION") audioManager.abandonAudioFocus(null)
+        }
+    }
+
+    private fun setMaxVolume(stream: Int) {
+        try {
+            audioManager.setStreamVolume(stream, audioManager.getStreamMaxVolume(stream), 0)
+        } catch (_: Exception) {
+        }
+    }
+
+    @Synchronized
+    fun stopActive() {
+        activeTrack?.let {
+            try { it.stop() } catch (_: Exception) { }
+            try { it.release() } catch (_: Exception) { }
+        }
+        activeTrack = null
+        abandonFocus()
     }
 }
