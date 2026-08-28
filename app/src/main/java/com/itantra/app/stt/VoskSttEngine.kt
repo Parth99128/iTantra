@@ -50,8 +50,13 @@ class VoskSttEngine(private val context: Context) : SttEngine {
         val start = System.nanoTime()
         val text = JSONObject(rec.finalResult).optString("text", "")
         inferenceTimeMs += (System.nanoTime() - start) / 1_000_000
-        val durationMs = audioSamples * 1000 / 16000
-        val result = SttResult(text, true, inferenceTimeMs, durationMs)
+        val durationMs = audioSamples * 1000L / 16000L
+        val result = SttResult(
+            text = text,
+            isFinal = true,
+            processingTimeMs = inferenceTimeMs,
+            audioDurationMs = durationMs,
+        )
         audioSamples = 0
         inferenceTimeMs = 0
         emit(result)
