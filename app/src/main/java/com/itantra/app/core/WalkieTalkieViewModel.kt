@@ -54,6 +54,7 @@ class WalkieTalkieViewModel(application: Application) : AndroidViewModel(applica
 
     fun installModelPack(uri: Uri) {
         if (_uiState.value.installInProgress) return
+        stopListening()
         viewModelScope.launch(Dispatchers.IO) {
             _uiState.update { it.copy(installInProgress = true, installMessage = "Installing offline model pack…", errorMessage = null) }
             runCatching { packManager.installPack(uri) }
@@ -63,6 +64,7 @@ class WalkieTalkieViewModel(application: Application) : AndroidViewModel(applica
     }
 
     fun loadModels(language: SupportedLanguage) {
+        stopListening()
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 require(packManager.isInstalled(language)) { "${language.displayName} offline model pack is not installed" }
@@ -71,7 +73,7 @@ class WalkieTalkieViewModel(application: Application) : AndroidViewModel(applica
                 if (packManager.hasStt(language)) sttEngine.value.loadModel(language)
                 if (packManager.hasTts(language)) ttsEngine.value.loadModel(language)
                 if (vad.isInitialized()) vad.value.reset()
-            }.onSuccess { _uiState.update { it.copy(language = language, errorMessage = null) } }
+            }.onSuccess { _uiState.update { it.copy(language = language, errorMessage = null, partialTranscript = "") } }
                 .onFailure { e -> _uiState.update { it.copy(language = language, errorMessage = e.message ?: "Offline model unavailable") } }
         }
     }
@@ -80,6 +82,7 @@ class WalkieTalkieViewModel(application: Application) : AndroidViewModel(applica
         _uiState.update { it.copy(mode = mode) }
         if (mode == OperatingMode.NORMAL_PHONE) { stopListening(); bluetooth.disconnect() }
     }
+
     fun startDiscovery() = bluetooth.startDiscovery()
     fun startAsHost() { currentActivity?.let { bluetooth.startAsServer(it) } ?: _uiState.update { it.copy(errorMessage = "Bluetooth host is not ready") } }
     fun connectToPeer(peer: BluetoothPeer) = bluetooth.connectToDevice(peer.device)
@@ -96,7 +99,9 @@ class WalkieTalkieViewModel(application: Application) : AndroidViewModel(applica
                 vad.value.reset()
                 _uiState.update { it.copy(talkState = TalkState.LISTENING_FOR_SPEECH, partialTranscript = "", errorMessage = null) }
                 recorder = AudioRecorder { pcm, size -> onMicFrame(pcm, size) }.also { it.start() }
-            } catch (e: Throwable) { _uiState.update { it.copy(talkState = TalkState.IDLE, errorMessage = "Microphone/ML initialization failed: ${e.message}") } }
+            } catch (e: Throwable) {
+                _uiState.update { it.copy(talkState = TalkState.IDLE, errorMessage = "Microphone/ML initialization failed: ${e.message}") }
+            }
         }
     }
 
@@ -121,7 +126,20 @@ class WalkieTalkieViewModel(application: Application) : AndroidViewModel(applica
         runCatching { vad.value.processChunk(pcmFloatBuffer) }.onSuccess { result ->
             if (result.isSpeech) sttEngine.value.acceptAudioFrame(pcm, size)
             if (result.utteranceEnded && _uiState.value.talkState == TalkState.LISTENING_FOR_SPEECH) onPushToTalkEnd()
-        }.onFailure { e -> _uiState.update { it.copy(errorMessage = "VAD failed: ${e.message}") } }
+        }.onFailure { e ->
+            recorder?.stop(); recorder = null
+            _uiState.update { it.copy(talkState = TalkState.IDLE, errorMessage = "VAD failed: ${e.message}") }
+        }
+    }
+
+    fun sendManualMessage(text: String) {
+        val clean = text.trim()
+        if (clean.isBlank()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update { it.copy(talkState = TalkState.TRANSMITTING, errorMessage = null) }
+            bluetooth.sendText(clean)
+            _uiState.update { it.copy(lastFinalTranscript = clean, talkState = TalkState.IDLE) }
+        }
     }
 
     fun testTts(text: String) {
@@ -132,7 +150,7 @@ class WalkieTalkieViewModel(application: Application) : AndroidViewModel(applica
                 require(packManager.hasTts(language)) { "Offline TTS model for ${language.displayName} is not installed" }
                 if (!ttsEngine.isInitialized()) ttsEngine.value.loadModel(language)
                 val result = ttsEngine.value.synthesize(text)
-                _uiState.update { it.copy(talkState = TalkState.RECEIVING, lastTtsLatencyMs = result.processingTimeMs, errorMessage = null) }
+                _uiState.update { it.copy(talkState = TalkState.RECEIVING, lastTtsLatencyMs = result.processingTimeMs, lastEndToEndMs = 0, errorMessage = null) }
                 audioPlayer.playVoiceNote(result.pcm16, result.sampleRate)
                 _uiState.update { it.copy(talkState = TalkState.IDLE) }
             }.onFailure { e -> _uiState.update { it.copy(talkState = TalkState.IDLE, errorMessage = "TTS failed: ${e.message}") } }
