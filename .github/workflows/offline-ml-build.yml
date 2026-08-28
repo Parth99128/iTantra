@@ -36,7 +36,8 @@ jobs:
 
       - name: Provision compact real offline model packs
         run: |
-          python3 tools/fetch_models.py --stt hi,en,gu --tts hi,mr,en
+          rm -rf app/src/main/assets/models
+          python3 tools/fetch_models.py --stt hi,en --tts hi,mr,en
           echo "=== model footprint ==="
           du -sh app/src/main/assets/models
           find app/src/main/assets/models -type f -printf '%p %k KB\n' | sort
