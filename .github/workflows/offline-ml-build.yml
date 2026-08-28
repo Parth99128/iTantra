@@ -34,23 +34,27 @@ jobs:
       - name: Install Android SDK 34
         run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0'
 
-      - name: Provision real offline model packs
+      - name: Provision compact real offline model packs
         run: |
           python3 tools/fetch_models.py --stt hi,en,gu --tts hi,mr,en
-          find app/src/main/assets/models -maxdepth 4 -type f -printf '%p %k KB\n' | sort
+          echo "=== model footprint ==="
+          du -sh app/src/main/assets/models
+          find app/src/main/assets/models -type f -printf '%p %k KB\n' | sort
 
-      - name: Build debug APK with bundled models
+      - name: Build ABI-specific debug APKs
         run: gradle :app:assembleDebug --stacktrace --no-daemon
 
-      - name: Verify APK contains model assets
+      - name: Verify APKs and report sizes
         run: |
-          APK=app/build/outputs/apk/debug/app-debug.apk
-          test -f "$APK"
-          unzip -l "$APK" | grep -E 'silero_vad|model.onnx|tokens.txt' | head -80
+          find app/build/outputs/apk -type f -name '*.apk' -print -exec du -h {} \;
+          for APK in app/build/outputs/apk/debug/*.apk; do
+            echo "=== $APK ==="
+            unzip -l "$APK" | grep -E 'silero_vad|model.onnx|tokens.txt|espeak-ng-data' | head -100
+          done
 
-      - name: Upload APK
+      - name: Upload ABI-specific APKs
         uses: actions/upload-artifact@v4
         with:
-          name: itantra-offline-ml-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: itantra-offline-ml-debug-apks
+          path: app/build/outputs/apk/debug/*.apk
           retention-days: 14
