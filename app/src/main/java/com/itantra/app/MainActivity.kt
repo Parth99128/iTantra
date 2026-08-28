@@ -26,9 +26,7 @@ class MainActivity : ComponentActivity() {
     private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
         if (result.values.any { it == false }) viewModel.setPermissionWarning("Bluetooth/microphone permission is required for the selected feature.")
     }
-    private val modelPackPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let(viewModel::installModelPack)
-    }
+    private val modelPackPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(viewModel::installModelPack) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -45,9 +43,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             ITantraTheme {
                 Surface(Modifier.fillMaxSize()) {
-                    WalkieTalkieScreen(viewModel) {
-                        modelPackPicker.launch(arrayOf("application/zip", "application/octet-stream"))
-                    }
+                    WalkieTalkieScreen(viewModel) { modelPackPicker.launch(arrayOf("application/zip", "application/octet-stream")) }
                 }
             }
         }
@@ -61,6 +57,7 @@ fun WalkieTalkieScreen(viewModel: WalkieTalkieViewModel, onPickModelPack: () -> 
     var langExpanded by remember { mutableStateOf(false) }
     var peerExpanded by remember { mutableStateOf(false) }
     var ttsText by remember { mutableStateOf("आपातकालीन संदेश: कृपया तुरंत सहायता भेजें।") }
+    var messageText by remember { mutableStateOf("") }
 
     LazyColumn(Modifier.fillMaxSize().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         item {
@@ -71,8 +68,7 @@ fun WalkieTalkieScreen(viewModel: WalkieTalkieViewModel, onPickModelPack: () -> 
                 Text(if (state.installInProgress) "Installing…" else "Install Offline Model Pack")
             }
             if (state.installInProgress) {
-                Spacer(Modifier.height(8.dp))
-                LinearProgressIndicator(Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp)); LinearProgressIndicator(Modifier.fillMaxWidth())
             }
             if (state.installMessage.isNotBlank()) Text(state.installMessage, style = MaterialTheme.typography.bodySmall)
             state.permissionWarning?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
@@ -81,7 +77,10 @@ fun WalkieTalkieScreen(viewModel: WalkieTalkieViewModel, onPickModelPack: () -> 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Walkie-Talkie Mode")
                 Spacer(Modifier.width(8.dp))
-                Switch(checked = state.mode == OperatingMode.WALKIE_TALKIE, onCheckedChange = { viewModel.setMode(if (it) OperatingMode.NORMAL_PHONE else OperatingMode.WALKIE_TALKIE) })
+                Switch(
+                    checked = state.mode == OperatingMode.WALKIE_TALKIE,
+                    onCheckedChange = { enabled -> viewModel.setMode(if (enabled) OperatingMode.WALKIE_TALKIE else OperatingMode.NORMAL_PHONE) }
+                )
             }
             Spacer(Modifier.height(8.dp))
             Box {
@@ -114,18 +113,22 @@ fun WalkieTalkieScreen(viewModel: WalkieTalkieViewModel, onPickModelPack: () -> 
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(14.dp)) {
                     Text("Offline TTS", style = MaterialTheme.typography.titleMedium)
-                    Text(if (state.language == SupportedLanguage.MARATHI) "Marathi is TTS-only in the current model matrix." else "Speak text locally without Bluetooth.", style = MaterialTheme.typography.bodySmall)
+                    Text("Convert text to speech locally. No Bluetooth is required for this test.", style = MaterialTheme.typography.bodySmall)
                     Spacer(Modifier.height(6.dp))
-                    OutlinedTextField(
-                        value = ttsText,
-                        onValueChange = { ttsText = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Text to speak") },
-                        minLines = 2,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text)
-                    )
+                    OutlinedTextField(value = ttsText, onValueChange = { ttsText = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Text to speak") }, minLines = 2, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text))
                     Spacer(Modifier.height(6.dp))
                     Button(onClick = { viewModel.testTts(ttsText) }, enabled = ttsText.isNotBlank() && !state.installInProgress) { Text("Speak Offline") }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(14.dp)) {
+                    Text("Send Text Message", style = MaterialTheme.typography.titleMedium)
+                    Text("Send only a tiny text payload over Bluetooth; the receiver converts it to speech.", style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedTextField(value = messageText, onValueChange = { messageText = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Message to send") }, minLines = 2)
+                    Spacer(Modifier.height(6.dp))
+                    Button(onClick = { viewModel.sendManualMessage(messageText); messageText = "" }, enabled = messageText.isNotBlank() && state.btState == BtConnectionState.CONNECTED) { Text("Send Message") }
                 }
             }
             Spacer(Modifier.height(18.dp))
