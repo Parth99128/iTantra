@@ -1,0 +1,10 @@
+metric,value
+raw_rows,253259
+raw_columns_after_empty_notes_removal,9
+candidate_rows_before_dedup,3688
+candidate_rows_after_dedup,3687
+quarantine_rows,249571
+duplicate_candidates_removed,1
+source_files,325
+empty_notes_column_removed,1
+rule,"A numeric/date field is populated only when exactly one unambiguous token exists. ML candidates require a nonempty project name, at least 2 valid numeric/date fields, at least 1 valid numeric field, and no more than 1 raw extraction ambiguity. Other rows are quarantined rather than guessed."
